@@ -1,0 +1,54 @@
+----------- Loading graphs ------------
+# vertices = 6
+# edges = 6
+# vertices = 403394
+# edges = 2199067
+Load Graphs: 1657.3ms
+------------ Preprocessing ------------
+DAG: 
+1: (backwards: ) (forwards: 0 )
+0: (backwards: 1 ) (forwards: 4 2 )
+4: (backwards: 0 ) (forwards: )
+2: (backwards: 0 ) (forwards: 3 )
+3: (backwards: 2 ) (forwards: 5 )
+5: (backwards: 3 ) (forwards: )
+
+Time taken to build DAG: 0.169553 seconds.
+spanning tree: 
+1 | 1-0 | 0-4 | 0-2 | 2-3 | 3-5 | 
+matching order: 
+-vertex(u_min: joinablity check vertices)-
+1(0:)-0(1:)-4(0:)-2(0:4,)-3(2:)-5(3:)-
+0(0:)-1(0:)-4(0:)-2(0:4,)-3(2:)-5(3:)-
+2(0:)-0(0:)-1(0:)-4(0:2,)-3(2:)-5(3:)-
+4(0:)-0(0:)-1(0:)-2(0:4,)-3(2:)-5(3:)-
+3(0:)-2(0:)-0(2:)-1(0:)-4(0:2,)-5(3:)-
+2(0:)-4(0:)-0(4:2,)-1(0:)-3(2:)-5(3:)-
+5(0:)-3(0:)-2(3:)-0(2:)-1(0:)-4(0:2,)-
+Time taken to build DCS: 0.490878 seconds.
+Preprocessing: 737.526ms
+--------- Incremental Matching --------
+auto_tuning off:0
+use 32 threads for incresemental matching 
+Incremental Matching: 4484.63ms
+0 vertex updates.
+244356 edge updates.
+23671 unsafe updates.
+14644393 positive matches.
+0 negative matches.
+# vertices in index: 0: 62274 1: 53047 2: 52926 3: 52775 4: 52947 5: 52926 
+# d1 vertex in index: 0: 50065 1: 53047 2: 41244 3: 48478 4: 49792 5: 50898 
+# d2 vertex in index: 0: 34878 1: 44244 2: 41244 3: 48478 4: 49792 5: 50898 
+# edges in index: 0-4: 135904 0-2: 136003 1-0: 135477 2-3: 135748 3-5: 135748 
+# d1 edges in index: 0-4: 131757 0-2: 131846 1-0: 135477 2-3: 129747 3-5: 132848 
+# d2 edges in index: 0-4: 99101 0-2: 101220 1-0: 123708 2-3: 112319 3-5: 129747 
+# candidates vertices: 293524
+# valid candidates vertices: 269534
+# candidates edges: 661675
+# valid candidates edges: 566095
+
+# edges in index in total: 678880
+# vertices in index in total: 326895
+Peak Virtual Memory: 2707764 KB
+
+----------------- End -----------------

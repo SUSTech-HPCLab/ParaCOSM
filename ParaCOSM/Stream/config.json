@@ -1,0 +1,14 @@
+{
+    "query": "query.graph",
+    "data": "data.graph",
+    "update": "updates.stream",
+    "algorithm": "fastmatch",
+    "max-results": 1000,
+    "time-limit": 3600,
+    "print-prep": false,
+    "print-enum": true,
+    "homo": true,
+    "report-initial": false,
+    "initial-time-limit": 10,
+    "orders": [[1,2,3], [4,5,6]]
+}
