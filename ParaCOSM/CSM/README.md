@@ -69,6 +69,4 @@ e 2 3 2
 -e 0 1 0
 ```
 
-## Datasets and Querysets
 
-The graph datasets and their corresponding querysets used in our paper can be downloaded [here](https://hkustconnect-my.sharepoint.com/:f:/g/personal/xsunax_connect_ust_hk/Et-cxVY7l5FCoZoKeDyMzmQBaCBn8ffbPFFQfIFOqGIodA?e=4vT3OI).
