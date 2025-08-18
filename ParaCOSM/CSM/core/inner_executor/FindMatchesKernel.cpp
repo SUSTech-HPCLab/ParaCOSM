@@ -1677,3 +1677,438 @@ void Parallel_TurboFlux::Parallel_TurboFlux_FindMatches_ParaCOSM_Kernel(uint ord
     }
 
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// void CSMPP::Parallel_searchVertex(uint queryIndex, uint edgeIndex, searchType type, 
+//     uint depth){
+
+//     auto & QUERY_GRAPH = this->queryVec[queryIndex]; // take one query graph
+//     const uint cacheStatu = QUERY_GRAPH.getCacheStatu(edgeIndex, depth);
+//     const auto & MATCHORDER = QUERY_GRAPH.GetMatchOrder(edgeIndex);
+//     const uint queryVexter = MATCHORDER[depth];
+//     vertexType currentSearchVertexType = QUERY_GRAPH.getVertexType(edgeIndex, depth);
+//     const auto & desItem = QUERY_GRAPH.GetDescList(edgeIndex, depth);//<v1Index,v1Label,eLabel>
+//     const auto & freezeIndex = QUERY_GRAPH.getUnfreezeList(edgeIndex, depth);
+
+//     //  ///////////////////////////////////////////////////////////////
+    
+//     uint vertexLabel = QUERY_GRAPH.GetVertexLabel(queryVexter);
+
+//     //1.intersection worst case
+//     //1.1 find min
+//     std::vector<uint> candidate;
+//     LRAndIndexCheckType decision = QUERY_GRAPH.getDecision(edgeIndex, depth); // adaptive label distribute check
+
+//     uint min_u_index = INT_MAX;
+//     uint min_u_neighborSize = INT_MAX;
+
+//     for(int i = 0; i < desItem.size(); i++){
+//         const auto & item = desItem[i];
+
+//         uint v = this->match[std::get<0>(item)]; // gaigaigai
+
+//         uint Size = this->data_.getIndexValue(v, vertexLabel);
+//         if(Size < min_u_neighborSize){
+//             min_u_index = i;
+//             min_u_neighborSize = Size;
+//         }
+//         else if(Size == min_u_neighborSize){
+//             uint preID = this->match[std::get<0>(desItem[min_u_index])]; // gaigaigai
+
+//             if(this->data_.GetNeighbors(preID).size() > this->data_.GetNeighbors(v).size()){
+//                 min_u_index = i;
+//                 min_u_neighborSize = Size;
+//             }
+//         }
+//     }
+
+
+
+
+
+//     uint min_u = this->match[std::get<0>(desItem[min_u_index])];
+
+
+//     uint min_u_elabel = std::get<2>(desItem[min_u_index]);//elabel
+
+//     const auto& MinNeighbor = data_.GetNeighbors(min_u);
+//     const auto& q_nbr_labels = data_.GetNeighborLabels(min_u);
+//     // std::cout << NUM_L << std::endl;
+//     // NUM_L++;8
+
+    
+//     for(int i = 0; i < MinNeighbor.size(); i++){
+//         const uint v = MinNeighbor[i];
+//         //1. check label
+//         if( this->data_.GetVertexLabel(v) != vertexLabel || q_nbr_labels[i] != min_u_elabel)continue;
+
+//         //2. check visit
+//         if(this->visited_[v] == true && !homomorphism_ ) continue;
+        
+//         // std::cout << NUM_L << std::endl;
+//         // NUM_L++; // 369
+
+//         //3.check if joinable
+//         bool joinable = true;
+//         for(int k = 0; k < desItem.size(); k++){
+//             if(k == min_u_index) continue;
+
+//             const uint data_V = this->match[std::get<0>(desItem[k])];
+
+//             const uint elabel = std::get<2>(desItem[k]);
+//             const auto & dataVNeighbor = this->data_.GetNeighbors(data_V);
+//             auto it = std::lower_bound(dataVNeighbor.begin(), dataVNeighbor.end(), v);
+//             if(it == dataVNeighbor.end() || *it != v){
+//                 joinable = false;
+//                 break;
+//             }
+//             else
+//             {
+//                 uint dis = std::distance(dataVNeighbor.begin(), it);
+//                 if(this->data_.GetNeighborLabels(data_V)[dis] != elabel){
+//                     joinable = false;
+//                     break;
+//                 }
+//             }
+//         }
+
+//         // std::cout << NUM_L << std::endl;
+//         // NUM_L++; // 369
+
+//         if(!joinable){
+//             continue;
+//         }
+//         // std::cout << NUM_L << std::endl;
+//         // NUM_L++; 369
+//         if(decision == Part1Check && !this->indexCheck(v, queryVexter, queryIndex)){
+//             continue;
+//         }
+
+//         // std::cout << NUM_L << std::endl;
+//         // NUM_L++; 367
+        
+//         candidate.emplace_back(v);
+//     }
+        
+//     if(candidate.size() == 0){
+//         return;
+//     }
+    
+//     // std::cout << NUM_L << std::endl;
+//     // NUM_L++; 7
+
+
+
+//     if(currentSearchVertexType == freeVertex){
+//             // if(candidate.size() > 32){
+//             //     std::cout << candidate.size()  << std::endl;    
+//             // }
+//         size_t NUMT = 64;
+//         if(candidate.size() < Thread_MAX){
+//             NUMT = candidate.size();
+//         }else{
+//             NUMT = Thread_MAX;
+//         }
+
+//         #pragma omp parallel for num_threads(NUMT) shcedule(dynamic, 1)
+//         for(int i =0; i < candidate.size(); i++){
+//             size_t thread_id = omp_get_thread_num();
+//             matchVertexlocal(candidate[i], depth, match_parallel[thread_id], visited_parallel[thread_id]);
+//             auto dataV = candidate[i];
+//             // this->matchVertex(dataV, depth);
+
+//             // this->searchVertex(queryIndex, edgeIndex, type, depth + 1);
+//             Parallel_searchVertex_local(queryIndex, edgeIndex, type, depth + 1, thread_id);
+
+//             // this->popVertex(dataV, depth);
+//             popVertex_local(candidate[i], depth, match_parallel[thread_id], visited_parallel[thread_id]);
+//             // ma
+//         }
+
+//         // for(auto & dataV : candidate){
+//         //     this->matchVertex(dataV, depth);
+//         //     this->searchVertex(queryIndex, edgeIndex, type, depth + 1);
+//         //     this->popVertex(dataV, depth);
+//         // }
+//     }
+//     else{
+        
+//         this->matchVertex(candidate, depth);
+//         this->matchVertexAll(candidate, depth);
+//         // this->match_parallel[0] = this->match;
+        
+
+//         if(currentSearchVertexType == isolatedVertex){
+//             this->queryVec[queryIndex].isolatedVertexTimesAdd(this->matchCandidate[depth]);
+//         }
+//         if(depth == this->queryVec[queryIndex].NumVertices() - 1){
+//             this->addMatchResult(queryIndex, edgeIndex, type);
+//         }
+//         else{
+
+//             // Parallel_searchVertex(queryIndex, edgeIndex, type, depth + 1);
+            
+//             size_t thread_id = omp_get_thread_num();
+//             Parallel_searchVertex_local(queryIndex, edgeIndex, type, depth + 1, thread_id);
+            
+//             // this->searchVertex(queryIndex, edgeIndex, type, depth + 1);
+//         }
+//         if(currentSearchVertexType == isolatedVertex){
+//             this->queryVec[queryIndex].isolatedVertexTimesMinus(this->matchCandidate[depth]);
+//         }
+//         this->popVertex(depth);
+//         this->popVertexAll(depth);
+//     }
+// }
+
+
+
+
+
+
+
+
+// void CSMPP::Parallel_searchVertex_local(uint queryIndex, uint edgeIndex, searchType type, 
+//     uint depth, size_t thread_id){
+
+//     auto & QUERY_GRAPH = this->queryVec[queryIndex]; // take one query graph
+//     const uint cacheStatu = QUERY_GRAPH.getCacheStatu(edgeIndex, depth);
+//     const auto & MATCHORDER = QUERY_GRAPH.GetMatchOrder(edgeIndex);
+//     const uint queryVexter = MATCHORDER[depth];
+//     vertexType currentSearchVertexType = QUERY_GRAPH.getVertexType(edgeIndex, depth);
+//     const auto & desItem = QUERY_GRAPH.GetDescList(edgeIndex, depth);//<v1Index,v1Label,eLabel>
+//     const auto & freezeIndex = QUERY_GRAPH.getUnfreezeList(edgeIndex, depth);
+
+//     //  ///////////////////////////////////////////////////////////////
+    
+//     uint vertexLabel = QUERY_GRAPH.GetVertexLabel(queryVexter);
+
+
+//     //1.intersection worst case
+//     //1.1 find min
+//     std::vector<uint> candidate;
+//     LRAndIndexCheckType decision = QUERY_GRAPH.getDecision(edgeIndex, depth); // adaptive label distribute check
+
+//     uint min_u_index = INT_MAX;
+//     uint min_u_neighborSize = INT_MAX;
+
+
+
+//     for(int i = 0; i < desItem.size(); i++){
+//         const auto & item = desItem[i];
+
+//         // uint v = this->match[std::get<0>(item)]; // gaigaigai
+//         uint v = this->match_parallel[thread_id][std::get<0>(item)]; // gaigaigai
+
+//         uint Size = this->data_.getIndexValue(v, vertexLabel);
+//         if(Size < min_u_neighborSize){
+//             min_u_index = i;
+//             min_u_neighborSize = Size;
+//         }
+//         else if(Size == min_u_neighborSize){
+//             // uint preID = this->match[std::get<0>(desItem[min_u_index])]; // gaigaigai
+//             uint preID = this->match_parallel[thread_id][std::get<0>(desItem[min_u_index])];
+
+//             if(this->data_.GetNeighbors(preID).size() > this->data_.GetNeighbors(v).size()){
+//                 min_u_index = i;
+//                 min_u_neighborSize = Size;
+//             }
+//         }
+//     }
+
+//     // std::cout << NUM_L << std::endl;
+//     // NUM_L++; //201
+//     // std::cout << "min_u_index: " << min_u_index << std::endl;
+
+//     // uint min_u = this->match[std::get<0>(desItem[min_u_index])];
+//     if(desItem.size()==0){
+//         return;
+//     }
+
+//     uint min_u = this->match_parallel[thread_id][std::get<0>(desItem[min_u_index])];
+
+//     uint min_u_elabel = std::get<2>(desItem[min_u_index]);//elabel
+
+//     const auto& MinNeighbor = data_.GetNeighbors(min_u);
+//     const auto& q_nbr_labels = data_.GetNeighborLabels(min_u);
+
+//     // std::cout << NUM_L << std::endl;
+//     // NUM_L++; //200
+    
+//     for(int i = 0; i < MinNeighbor.size(); i++){
+//         const uint v = MinNeighbor[i];
+//         //1. check label
+//         if( this->data_.GetVertexLabel(v) != vertexLabel || q_nbr_labels[i] != min_u_elabel)continue;
+
+//         //2. check visit
+//         // if(this->visited_[v] == true && !homomorphism_ ) continue;
+//         if(this->visited_parallel[thread_id][v] == true && !homomorphism_){continue;}
+
+//         //3.check if joinable
+//         bool joinable = true;
+//         for(int k = 0; k < desItem.size(); k++){
+//             if(k == min_u_index) continue;
+
+//             // const uint data_V = this->match[std::get<0>(desItem[k])];
+//             const uint data_V = this->match_parallel[thread_id][std::get<0>(desItem[k])];
+
+//             const uint elabel = std::get<2>(desItem[k]);
+//             const auto & dataVNeighbor = this->data_.GetNeighbors(data_V);
+//             auto it = std::lower_bound(dataVNeighbor.begin(), dataVNeighbor.end(), v);
+//             if(it == dataVNeighbor.end() || *it != v){
+//                 joinable = false;
+//                 break;
+//             }
+//             else
+//             {
+//                 uint dis = std::distance(dataVNeighbor.begin(), it);
+//                 if(this->data_.GetNeighborLabels(data_V)[dis] != elabel){
+//                     joinable = false;
+//                     break;
+//                 }
+//             }
+//         }
+//         if(!joinable){
+//             continue;
+//         }
+//         if(decision == Part1Check && !this->indexCheck(v, queryVexter, queryIndex)){
+//             continue;
+//         }
+        
+//         candidate.emplace_back(v);
+//     }
+        
+//     if(candidate.size() == 0){
+//         return;
+//     }
+
+            
+// // std::cout << "min_u_index: " << min_u_index << std::endl;
+
+ 
+//     if(currentSearchVertexType == freeVertex){
+
+//         for(int i =0; i < candidate.size(); i++){
+            
+//             // size_t thread_id = omp_get_thread_num();
+//             matchVertexlocal(candidate[i], depth, match_parallel[thread_id], visited_parallel[thread_id]);
+//             auto dataV = candidate[i];
+            
+//             this->Parallel_searchVertex_local(queryIndex, edgeIndex, type, depth + 1, thread_id);
+
+//             popVertex_local(candidate[i], depth, match_parallel[thread_id], visited_parallel[thread_id]);
+//         }
+
+//         // for(auto & dataV : candidate){
+//         //     this->matchVertex(dataV, depth);
+//         //     this->searchVertex(queryIndex, edgeIndex, type, depth + 1);
+//         //     this->popVertex(dataV, depth);
+//         // }
+//     }
+//     else{
+//         // this->matchVertex(candidate, depth);
+//         this->matchVertexlocal(candidate, depth, match_parallel[thread_id], matchCandidate_parallel[thread_id], thread_id);
+        
+//         if(currentSearchVertexType == isolatedVertex){
+//             // this->queryVec[queryIndex].isolatedVertexTimesAdd(this->matchCandidate[depth]);
+//             // std::cout << NUM_L << std::endl;
+//             // NUM_L++;
+//             this->queryVec[queryIndex].isolatedVertexTimesAdd(matchCandidate_parallel[thread_id][depth]);
+//             // std::cout << NUM_L << std::endl;
+//             // NUM_L++;
+//         }
+//         if(depth == this->queryVec[queryIndex].NumVertices() - 1){
+//             this->addMatchResult(queryIndex, edgeIndex, type);
+//         }
+//         else{
+
+//             this->Parallel_searchVertex_local(queryIndex, edgeIndex, type, depth + 1, thread_id);
+//             // std::cout << NUM_L << std::endl;
+//             // NUM_L++;
+//             // this->searchVertex(queryIndex, edgeIndex, type, depth + 1);
+//         }
+//         if(currentSearchVertexType == isolatedVertex){
+//             // this->queryVec[queryIndex].isolatedVertexTimesMinus(this->matchCandidate[depth]);
+//             this->queryVec[queryIndex].isolatedVertexTimesMinus(matchCandidate_parallel[thread_id][depth]);
+//         }
+//         // this->popVertex(depth);
+//         this->popVertex_local(depth, match_parallel[thread_id], matchCandidate_parallel[thread_id], thread_id);
+//     }
+// }
+
+
+
+
+
+// void turnOffProcess_parallel(uint v1, uint v2){
+
+//     G[v1].nei.erase(v2);
+//     G[v2].nei.erase(v1);
+    
+//     // v1 
+//     auto cand_v1 = G[v1].cand;
+    
+//     #pragma omp parallel
+//     {
+
+//         std::vector<std::tuple<uint, uint, uint>> local_updates; // (ui, uj, v2)
+//         std::vector<uint> local_erase_ui; // ui
+        
+//         #pragma omp for nowait
+//         for (int i = 0; i < cand_v1.size(); i++) {
+//             // 使用迭代器访问 map 的第 i 个元素
+//             auto it = cand_v1.begin();
+//             std::advance(it, i);
+//             uint ui = it->first;
+//             auto& candi = it->second;
+            
+//             if(G[v1].label != Q[ui].label){
+//                 local_erase_ui.push_back(ui);
+//                 continue;
+//             }
+            
+//             for(auto& ui_nei : candi){
+//                 uint uj = ui_nei.first;
+//                 if(Q[uj].label == G[v2].label){
+//                     local_updates.push_back(std::make_tuple(ui, uj, v2));
+//                 }
+//             }
+//         }
+
+//         #pragma omp critical
+//         {
+//             for(auto ui : local_erase_ui){
+//                 G[v1].cand.erase(ui);
+//                 G[v1].LI.erase(ui);
+//             }
+            
+//             for(auto& update : local_updates){
+//                 uint ui = std::get<0>(update);
+//                 uint uj = std::get<1>(update);
+//                 uint v_val = std::get<2>(update);
+                
+//                 G[v1].cand[ui][uj].erase(v_val);
+//                 G[v2].cand[uj][ui].erase(v1);
+//             }
+//         }
+//     }
+    
+//     turnOff(v1);
+//     turnOff(v2);
+// }
+
+
