@@ -7,11 +7,16 @@ Haibin Lai, Sicheng Zhou, Site Fan, Zhuozhao Li*
 
 ## Compile
 
+
 Our framework requires c++17 and intel icpx with onetbb. One can compile the code by executing the following commands. 
 
 ```shell
-make
+source /path/to/intel/oneAPI/setvars.sh
+mkdir build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release
+make -j
 ```
+
 
 ## Execute
 
@@ -21,8 +26,7 @@ After a successful compilation, the binary file is created under the `build/` di
 build/csm -q <query-graph-path> -d <data-graph-path> -u <update-stream-path> -a <algorithm>
 ```
 
-where `<algorithm>` is chosen from `sj-tree`, `graphflow`, `iedyn`, `turboflux`, and `symbi`.
-
+where `<algorithm>` is chosen from `parallel_graphflow`, `parallel_turboflux`, and `parallel_symbi` etc.
 
 
 ```shell
