@@ -1,7 +1,7 @@
 
 
 <p align="center">
-<img src="../../../docs/img/MainStruct.svg" alt="paracosm" width="400" margin="10px"/>
+<img src="../../../docs/img/MainStruct.svg" alt="paracosm" width="700" margin="10px"/>
 </p>
 
 # ParaCOSM Program Architecture
