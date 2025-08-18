@@ -1,0 +1,42 @@
+----------- Loading graphs ------------
+# vertices = 8
+# edges = 10
+# vertices = 403394
+# edges = 2199067
+Load Graphs: 986.138ms
+------------ Preprocessing ------------
+DAG: 
+0: (backwards: ) (forwards: 1 2 3 5 )
+1: (backwards: 0 ) (forwards: 2 )
+2: (backwards: 0 1 ) (forwards: )
+3: (backwards: 0 ) (forwards: 5 6 )
+5: (backwards: 0 3 ) (forwards: 6 7 )
+6: (backwards: 3 5 ) (forwards: )
+7: (backwards: 5 ) (forwards: 4 )
+4: (backwards: 7 ) (forwards: )
+
+Preprocessing: 1174.63ms
+--------- Incremental Matching --------
+auto_tuning on:1
+Incremental Matching: 2241.05ms
+0 vertex updates.
+244341 edge updates.
+21393 unsafe updates.
+12418865 positive matches.
+0 negative matches.
+# vertices in index: 0: 66070 1: 52955 2: 62426 3: 62198 4: 52791 5: 62257 6: 62253 7: 52892 
+# d1 vertex in index: 0: 66070 1: 43405 2: 41929 3: 50077 4: 48091 5: 46906 6: 36963 7: 42185 
+# d2 vertex in index: 0: 25139 1: 41962 2: 41929 3: 33703 4: 48091 5: 35592 6: 36963 7: 42185 
+# edges in index: 0-1: 135255 0-2: 134961 0-3: 134394 0-5: 135477 1-2: 136693 3-5: 135477 3-6: 134820 5-6: 136003 5-7: 135477 7-4: 135255 
+# d1 edges in index: 0-1: 135255 0-2: 113995 0-3: 134394 0-5: 128814 1-2: 115765 3-5: 128814 3-6: 107517 5-6: 104745 5-7: 132250 7-4: 129284 
+# d2 edges in index: 0-1: 77485 0-2: 77085 0-3: 77782 0-5: 78060 1-2: 116199 3-5: 97843 3-6: 97341 5-6: 101656 5-7: 106100 7-4: 114184 
+# candidates vertices: 375626
+# valid candidates vertices: 305564
+# candidates edges: 1230833
+# valid candidates edges: 943735
+
+# edges in index in total: 1353812
+# vertices in index in total: 473842
+Peak Virtual Memory: 570452 KB
+
+----------------- End -----------------

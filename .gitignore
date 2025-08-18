@@ -1,0 +1,19 @@
+.log
+Test_Learn_Experiment/
+.o
+build
+.DS_store
+.vscode/
+
+.zip
+*.zip
+*.tar.gz
+*.tar.bz2
+*.tar.xz
+*.tar
+*.tar.lz
+*.tar.lzo
+*.tar.lzma
+*.gz
+# data/*
+*.graph

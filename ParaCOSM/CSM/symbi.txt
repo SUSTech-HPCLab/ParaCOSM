@@ -1,0 +1,243 @@
+Directory /sparse_6 does not exist. Creating it...
+Starting tests for sparse_6 with dataset amazon/6
+Testing with QUERY_GRAPH: /home/cc/haibin2/paracosm/livejournal/random_walk/6_self/sparse/Q_0
+----------- Loading graphs ------------
+Failed to open: /home/cc/haibin2/paracosm/livejournal/random_walk/6_self/sparse/Q_0
+Finished testing QUERY_GRAPH: /home/cc/haibin2/paracosm/livejournal/random_walk/6_self/sparse/Q_0
+Testing with QUERY_GRAPH: /home/cc/haibin2/paracosm/livejournal/random_walk/6_self/sparse/Q_1
+----------- Loading graphs ------------
+Failed to open: /home/cc/haibin2/paracosm/livejournal/random_walk/6_self/sparse/Q_1
+Finished testing QUERY_GRAPH: /home/cc/haibin2/paracosm/livejournal/random_walk/6_self/sparse/Q_1
+Testing with QUERY_GRAPH: /home/cc/haibin2/paracosm/livejournal/random_walk/6_self/sparse/Q_2
+----------- Loading graphs ------------
+Failed to open: /home/cc/haibin2/paracosm/livejournal/random_walk/6_self/sparse/Q_2
+Finished testing QUERY_GRAPH: /home/cc/haibin2/paracosm/livejournal/random_walk/6_self/sparse/Q_2
+Testing with QUERY_GRAPH: /home/cc/haibin2/paracosm/livejournal/random_walk/6_self/sparse/Q_3
+----------- Loading graphs ------------
+# vertices = 6
+# edges = 8
+# vertices = 4847571
+# edges = 38566113
+Load Graphs: 33758.2ms
+------------ Preprocessing ------------
+Auto-tuning is disabled.
+DAG: 
+3: (backwards: ) (forwards: 2 4 5 )
+2: (backwards: 3 ) (forwards: 4 5 )
+4: (backwards: 2 3 ) (forwards: 5 )
+5: (backwards: 2 3 4 ) (forwards: 1 )
+1: (backwards: 5 ) (forwards: 0 )
+0: (backwards: 1 ) (forwards: )
+
+Time taken to build DAG: 2.87563 seconds.
+u: 0
+u: 1
+u: 5
+u: 4
+u: 2
+u: 3
+Time taken to build DCS: 1.61564 seconds.
+Preprocessing: 4499.83ms
+--------- Incremental Matching --------
+auto_tuning off:0
+use 32 threads for incresemental matching 
+Incremental Matching: 1214.52ms
+0 vertex updates.
+4285139 edge updates.
+9571 unsafe updates.
+32354699 positive matches.
+0 negative matches.
+# vertices in index: 0: 45752 1: 45223 2: 65709 3: 79228 4: 45465 5: 45603 
+# d1 vertex in index: 0: 23108 1: 13797 2: 31835 3: 79228 4: 15495 5: 10413 
+# d2 vertex in index: 0: 23108 1: 13797 2: 9403 3: 7576 4: 10914 5: 9492 
+# edges in index: 1-0: 95829 2-4: 93792 2-5: 95333 3-2: 94808 3-4: 92813 3-5: 94449 4-5: 93800 5-1: 95888 
+# d1 edges in index: 1-0: 66257 2-4: 62283 2-5: 48097 3-2: 94808 3-4: 60250 3-5: 46682 4-5: 47461 5-1: 62606 
+# d2 edges in index: 1-0: 50040 2-4: 41140 2-5: 42362 3-2: 36847 3-4: 35683 3-5: 36432 4-5: 44571 5-1: 42142 
+# candidates vertices: 173876
+# valid candidates vertices: 74290
+# candidates edges: 488444
+# valid candidates edges: 329217
+num_counter:0
+
+# edges in index in total: 756712
+# vertices in index in total: 326980
+Peak Virtual Memory: 4705804 KB
+
+----------------- End -----------------
+Finished testing QUERY_GRAPH: /home/cc/haibin2/paracosm/livejournal/random_walk/6_self/sparse/Q_3
+Testing with QUERY_GRAPH: /home/cc/haibin2/paracosm/livejournal/random_walk/6_self/sparse/Q_4
+----------- Loading graphs ------------
+Failed to open: /home/cc/haibin2/paracosm/livejournal/random_walk/6_self/sparse/Q_4
+Finished testing QUERY_GRAPH: /home/cc/haibin2/paracosm/livejournal/random_walk/6_self/sparse/Q_4
+Testing with QUERY_GRAPH: /home/cc/haibin2/paracosm/livejournal/random_walk/6_self/sparse/Q_5
+----------- Loading graphs ------------
+Failed to open: /home/cc/haibin2/paracosm/livejournal/random_walk/6_self/sparse/Q_5
+Finished testing QUERY_GRAPH: /home/cc/haibin2/paracosm/livejournal/random_walk/6_self/sparse/Q_5
+Testing with QUERY_GRAPH: /home/cc/haibin2/paracosm/livejournal/random_walk/6_self/sparse/Q_6
+----------- Loading graphs ------------
+Failed to open: /home/cc/haibin2/paracosm/livejournal/random_walk/6_self/sparse/Q_6
+Finished testing QUERY_GRAPH: /home/cc/haibin2/paracosm/livejournal/random_walk/6_self/sparse/Q_6
+Testing with QUERY_GRAPH: /home/cc/haibin2/paracosm/livejournal/random_walk/6_self/sparse/Q_7
+----------- Loading graphs ------------
+# vertices = 6
+# edges = 8
+# vertices = 4847571
+# edges = 38566113
+Load Graphs: 33025.9ms
+------------ Preprocessing ------------
+Auto-tuning is disabled.
+DAG: 
+0: (backwards: ) (forwards: 2 3 4 )
+2: (backwards: 0 ) (forwards: 1 3 4 )
+3: (backwards: 0 2 ) (forwards: 4 5 )
+4: (backwards: 0 2 3 ) (forwards: )
+1: (backwards: 2 ) (forwards: )
+5: (backwards: 3 ) (forwards: )
+
+Time taken to build DAG: 2.85211 seconds.
+u: 5
+u: 1
+u: 4
+u: 3
+u: 2
+u: 0
+Time taken to build DCS: 1.5564 seconds.
+Preprocessing: 4417.01ms
+--------- Incremental Matching --------
+auto_tuning off:0
+use 32 threads for incresemental matching 
+Incremental Matching: 1047.28ms
+0 vertex updates.
+4285131 edge updates.
+7844 unsafe updates.
+35629580 positive matches.
+0 negative matches.
+# vertices in index: 0: 79543 1: 45286 2: 79349 3: 66374 4: 79216 5: 45675 
+# d1 vertex in index: 0: 79543 1: 33213 2: 35351 3: 18183 4: 12268 5: 25462 
+# d2 vertex in index: 0: 7579 1: 33213 2: 8607 3: 10229 4: 12268 5: 25462 
+# edges in index: 0-2: 94016 0-3: 93216 0-4: 93999 2-1: 95008 2-3: 94141 2-4: 94648 3-4: 95365 3-5: 95576 
+# d1 edges in index: 0-2: 94016 0-3: 60319 0-4: 46168 2-1: 81048 2-3: 62448 2-4: 48158 3-4: 48496 3-5: 70315 
+# d2 edges in index: 0-2: 36556 0-3: 36079 0-4: 36201 2-1: 39005 2-3: 39847 2-4: 40266 3-4: 44142 3-5: 42861 
+# candidates vertices: 204020
+# valid candidates vertices: 97358
+# candidates edges: 510968
+# valid candidates edges: 314957
+num_counter:0
+
+# edges in index in total: 755969
+# vertices in index in total: 395443
+Peak Virtual Memory: 4657308 KB
+
+----------------- End -----------------
+Finished testing QUERY_GRAPH: /home/cc/haibin2/paracosm/livejournal/random_walk/6_self/sparse/Q_7
+Testing with QUERY_GRAPH: /home/cc/haibin2/paracosm/livejournal/random_walk/6_self/sparse/Q_8
+----------- Loading graphs ------------
+# vertices = 6
+# edges = 6
+# vertices = 4847571
+# edges = 38566113
+Load Graphs: 33533.1ms
+------------ Preprocessing ------------
+Auto-tuning is disabled.
+DAG: 
+5: (backwards: ) (forwards: 0 )
+0: (backwards: 5 ) (forwards: 1 4 )
+1: (backwards: 0 ) (forwards: 2 3 )
+4: (backwards: 0 ) (forwards: 2 )
+2: (backwards: 1 4 ) (forwards: )
+3: (backwards: 1 ) (forwards: )
+
+Time taken to build DAG: 2.16446 seconds.
+u: 3
+u: 2
+u: 4
+u: 1
+u: 0
+u: 5
+Time taken to build DCS: 1.35754 seconds.
+Preprocessing: 3530.5ms
+--------- Incremental Matching --------
+auto_tuning off:0
+use 32 threads for incresemental matching 
+Incremental Matching: 2426.85ms
+0 vertex updates.
+4285126 edge updates.
+13310 unsafe updates.
+110653805 positive matches.
+0 negative matches.
+# vertices in index: 0: 66118 1: 66295 2: 65930 3: 45607 4: 45259 5: 45149 
+# d1 vertex in index: 0: 31846 1: 25447 2: 15000 3: 29175 4: 20050 5: 45149 
+# d2 vertex in index: 0: 10674 1: 12434 2: 15000 3: 29175 4: 15491 5: 20056 
+# edges in index: 0-1: 95893 0-4: 94894 1-2: 96113 1-3: 95525 4-2: 95175 5-0: 94072 
+# d1 edges in index: 0-1: 81804 0-4: 80857 1-2: 53689 1-3: 75693 4-2: 53459 5-0: 94072 
+# d2 edges in index: 0-1: 45584 0-4: 45071 1-2: 49064 1-3: 46725 4-2: 54467 5-0: 60683 
+# candidates vertices: 166667
+# valid candidates vertices: 102830
+# candidates edges: 439574
+# valid candidates edges: 301594
+num_counter:0
+
+# edges in index in total: 571672
+# vertices in index in total: 334358
+Peak Virtual Memory: 4539804 KB
+
+----------------- End -----------------
+Finished testing QUERY_GRAPH: /home/cc/haibin2/paracosm/livejournal/random_walk/6_self/sparse/Q_8
+Testing with QUERY_GRAPH: /home/cc/haibin2/paracosm/livejournal/random_walk/6_self/sparse/Q_9
+----------- Loading graphs ------------
+Failed to open: /home/cc/haibin2/paracosm/livejournal/random_walk/6_self/sparse/Q_9
+Finished testing QUERY_GRAPH: /home/cc/haibin2/paracosm/livejournal/random_walk/6_self/sparse/Q_9
+Testing with QUERY_GRAPH: /home/cc/haibin2/paracosm/livejournal/random_walk/6_self/sparse/Q_10
+----------- Loading graphs ------------
+# vertices = 6
+# edges = 6
+# vertices = 4847571
+# edges = 38566113
+Load Graphs: 33467.2ms
+------------ Preprocessing ------------
+Auto-tuning is disabled.
+DAG: 
+0: (backwards: ) (forwards: 1 2 3 )
+1: (backwards: 0 ) (forwards: 2 5 )
+2: (backwards: 0 1 ) (forwards: )
+3: (backwards: 0 ) (forwards: 4 )
+5: (backwards: 1 ) (forwards: )
+4: (backwards: 3 ) (forwards: )
+
+Time taken to build DAG: 2.15902 seconds.
+u: 4
+u: 5
+u: 3
+u: 2
+u: 1
+u: 0
+Time taken to build DCS: 1.33145 seconds.
+Preprocessing: 3498.95ms
+--------- Incremental Matching --------
+auto_tuning off:0
+use 32 threads for incresemental matching 
+Incremental Matching: 2138.31ms
+0 vertex updates.
+4285124 edge updates.
+14306 unsafe updates.
+78955203 positive matches.
+0 negative matches.
+# vertices in index: 0: 79240 1: 66227 2: 65912 3: 45615 4: 45586 5: 46157 
+# d1 vertex in index: 0: 79240 1: 32090 2: 20947 3: 24952 4: 33330 5: 33657 
+# d2 vertex in index: 0: 10695 1: 15527 2: 20947 3: 24952 4: 33330 5: 33657 
+# edges in index: 0-1: 95640 0-2: 94329 0-3: 95104 1-2: 94754 1-5: 97404 3-4: 96190 
+# d1 edges in index: 0-1: 95640 0-2: 61401 0-3: 95104 1-2: 63189 1-5: 82986 3-4: 81956 
+# d2 edges in index: 0-1: 45680 0-2: 44013 0-3: 44334 1-2: 54592 1-5: 54343 3-4: 69019 
+# candidates vertices: 224216
+# valid candidates vertices: 139108
+# candidates edges: 480276
+# valid candidates edges: 311981
+num_counter:0
+
+# edges in index in total: 573421
+# vertices in index in total: 348737
+Peak Virtual Memory: 4542892 KB
+
+----------------- End -----------------
+Finished testing QUERY_GRAPH: /home/cc/haibin2/paracosm/livejournal/random_walk/6_self/sparse/Q_10
+Completed tests for sparse_6

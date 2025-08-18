@@ -1,0 +1,278 @@
+----------- Loading graphs ------------
+Failed to open: /home/cc/haibin2/livejournal/random_walk/7_self/dense/Q_1
+----------- Loading graphs ------------
+Failed to open: /home/cc/haibin2/livejournal/random_walk/7_self/dense/Q_2
+----------- Loading graphs ------------
+Failed to open: /home/cc/haibin2/livejournal/random_walk/7_self/dense/Q_3
+----------- Loading graphs ------------
+Failed to open: /home/cc/haibin2/livejournal/random_walk/7_self/dense/Q_4
+----------- Loading graphs ------------
+Failed to open: /home/cc/haibin2/livejournal/random_walk/7_self/dense/Q_5
+----------- Loading graphs ------------
+Failed to open: /home/cc/haibin2/livejournal/random_walk/7_self/dense/Q_6
+----------- Loading graphs ------------
+Failed to open: /home/cc/haibin2/livejournal/random_walk/7_self/dense/Q_7
+----------- Loading graphs ------------
+Failed to open: /home/cc/haibin2/livejournal/random_walk/7_self/dense/Q_8
+----------- Loading graphs ------------
+# vertices = 7
+# edges = 11
+# vertices = 3072627
+# edges = 110153979
+Load Graphs: 55209.1ms
+------------ Preprocessing ------------
+matching order: 
+-vertex(backward neighbors)-
+#0: 1-2(1)-3(1,2)-4(1,2,3)-5(1,3,4)-0(1)-6(2)
+#1: 3-1(3)-2(1,3)-4(1,2,3)-5(1,3,4)-0(1)-6(2)
+#2: 3-2(3)-1(2,3)-4(1,2,3)-5(1,3,4)-0(1)-6(2)
+#3: 4-1(4)-2(1,4)-3(1,2,4)-5(1,3,4)-0(1)-6(2)
+#4: 4-2(4)-1(2,4)-3(1,2,4)-5(1,3,4)-0(1)-6(2)
+#5: 4-3(4)-1(3,4)-2(1,3,4)-5(1,3,4)-0(1)-6(2)
+#6: 5-1(5)-3(1,5)-4(1,3,5)-2(1,3,4)-0(1)-6(2)
+#7: 5-3(5)-1(3,5)-4(1,3,5)-2(1,3,4)-0(1)-6(2)
+#8: 5-4(5)-1(4,5)-3(1,4,5)-2(1,3,4)-0(1)-6(2)
+#9: 0-1(0)-2(1)-3(1,2)-4(1,2,3)-5(1,3,4)-6(2)
+#10: 6-2(6)-1(2)-3(1,2)-4(1,2,3)-5(1,3,4)-0(1)
+
+Preprocessing: 5.209ms
+--------- Incremental Matching --------
+auto_tuning off:0
+use 32 threads for incresemental matching 
+Incremental Matching: 1452.69ms
+0 vertex updates.
+7338349 edge updates.
+0 unsafe updates.
+0 positive matches.
+0 negative matches.
+
+# edges in index in total: 0
+# vertices in index in total: 0
+Peak Virtual Memory: 5517512 KB
+
+----------------- End -----------------
+----------- Loading graphs ------------
+Failed to open: /home/cc/haibin2/livejournal/random_walk/7_self/dense/Q_10
+----------- Loading graphs ------------
+Failed to open: /home/cc/haibin2/livejournal/random_walk/7_self/dense/Q_11
+----------- Loading graphs ------------
+Failed to open: /home/cc/haibin2/livejournal/random_walk/7_self/dense/Q_12
+----------- Loading graphs ------------
+Failed to open: /home/cc/haibin2/livejournal/random_walk/7_self/dense/Q_13
+----------- Loading graphs ------------
+Failed to open: /home/cc/haibin2/livejournal/random_walk/7_self/dense/Q_14
+----------- Loading graphs ------------
+Failed to open: /home/cc/haibin2/livejournal/random_walk/7_self/dense/Q_15
+----------- Loading graphs ------------
+Failed to open: /home/cc/haibin2/livejournal/random_walk/7_self/dense/Q_16
+----------- Loading graphs ------------
+Failed to open: /home/cc/haibin2/livejournal/random_walk/7_self/dense/Q_17
+----------- Loading graphs ------------
+Failed to open: /home/cc/haibin2/livejournal/random_walk/7_self/dense/Q_18
+----------- Loading graphs ------------
+Failed to open: /home/cc/haibin2/livejournal/random_walk/7_self/dense/Q_19
+----------- Loading graphs ------------
+Failed to open: /home/cc/haibin2/livejournal/random_walk/7_self/dense/Q_20
+----------- Loading graphs ------------
+Failed to open: /home/cc/haibin2/livejournal/random_walk/7_self/dense/Q_21
+----------- Loading graphs ------------
+Failed to open: /home/cc/haibin2/livejournal/random_walk/7_self/dense/Q_22
+----------- Loading graphs ------------
+Failed to open: /home/cc/haibin2/livejournal/random_walk/7_self/dense/Q_23
+----------- Loading graphs ------------
+# vertices = 7
+# edges = 12
+# vertices = 3072627
+# edges = 110153979
+Load Graphs: 55212.1ms
+------------ Preprocessing ------------
+matching order: 
+-vertex(backward neighbors)-
+#0: 4-0(4)-5(0,4)-6(0,4,5)-3(4,5,6)-2(0,3)-1(4)
+#1: 5-0(5)-4(0,5)-6(0,4,5)-3(4,5,6)-2(0,3)-1(4)
+#2: 5-4(5)-0(4,5)-6(0,4,5)-3(4,5,6)-2(0,3)-1(4)
+#3: 6-0(6)-4(0,6)-5(0,4,6)-3(4,5,6)-2(0,3)-1(4)
+#4: 6-4(6)-0(4,6)-5(0,4,6)-3(4,5,6)-2(0,3)-1(4)
+#5: 6-5(6)-4(5,6)-0(4,5,6)-3(4,5,6)-2(0,3)-1(4)
+#6: 3-4(3)-5(3,4)-6(3,4,5)-0(4,5,6)-2(0,3)-1(4)
+#7: 3-5(3)-4(3,5)-6(3,4,5)-0(4,5,6)-2(0,3)-1(4)
+#8: 3-6(3)-4(3,6)-5(3,4,6)-0(4,5,6)-2(0,3)-1(4)
+#9: 2-0(2)-4(0)-3(2,4)-5(0,3,4)-6(0,3,4,5)-1(4)
+#10: 2-3(2)-4(3)-0(2,4)-5(0,3,4)-6(0,3,4,5)-1(4)
+#11: 1-4(1)-0(4)-5(0,4)-6(0,4,5)-3(4,5,6)-2(0,3)
+
+Preprocessing: 5.287ms
+--------- Incremental Matching --------
+auto_tuning off:0
+use 32 threads for incresemental matching 
+Incremental Matching: 1550.41ms
+0 vertex updates.
+7338362 edge updates.
+0 unsafe updates.
+0 positive matches.
+0 negative matches.
+
+# edges in index in total: 0
+# vertices in index in total: 0
+Peak Virtual Memory: 5517512 KB
+
+----------------- End -----------------
+----------- Loading graphs ------------
+# vertices = 7
+# edges = 11
+# vertices = 3072627
+# edges = 110153979
+Load Graphs: 54122.3ms
+------------ Preprocessing ------------
+matching order: 
+-vertex(backward neighbors)-
+#0: 3-1(3)-2(1,3)-4(1,2,3)-0(1,2)-5(3)-6(3,5)
+#1: 2-1(2)-3(1,2)-4(1,2,3)-0(1,2)-5(3)-6(3,5)
+#2: 2-3(2)-1(2,3)-4(1,2,3)-0(1,2)-5(3)-6(3,5)
+#3: 4-1(4)-3(1,4)-2(1,3,4)-0(1,2)-5(3)-6(3,5)
+#4: 4-2(4)-3(2,4)-1(2,3,4)-0(1,2)-5(3)-6(3,5)
+#5: 4-3(4)-1(3,4)-2(1,3,4)-0(1,2)-5(3)-6(3,5)
+#6: 0-1(0)-2(0,1)-3(1,2)-4(1,2,3)-5(3)-6(3,5)
+#7: 0-2(0)-1(0,2)-3(1,2)-4(1,2,3)-5(3)-6(3,5)
+#8: 5-3(5)-6(3,5)-1(3)-2(1,3)-4(1,2,3)-0(1,2)
+#9: 6-3(6)-5(3,6)-1(3)-2(1,3)-4(1,2,3)-0(1,2)
+#10: 6-5(6)-3(5,6)-1(3)-2(1,3)-4(1,2,3)-0(1,2)
+
+Preprocessing: 5.23ms
+--------- Incremental Matching --------
+auto_tuning off:0
+use 32 threads for incresemental matching 
+Incremental Matching: 1304.45ms
+0 vertex updates.
+7338362 edge updates.
+0 unsafe updates.
+0 positive matches.
+0 negative matches.
+
+# edges in index in total: 0
+# vertices in index in total: 0
+Peak Virtual Memory: 5517512 KB
+
+----------------- End -----------------
+----------- Loading graphs ------------
+Failed to open: /home/cc/haibin2/livejournal/random_walk/7_self/dense/Q_26
+----------- Loading graphs ------------
+Failed to open: /home/cc/haibin2/livejournal/random_walk/7_self/dense/Q_27
+----------- Loading graphs ------------
+Failed to open: /home/cc/haibin2/livejournal/random_walk/7_self/dense/Q_28
+----------- Loading graphs ------------
+Failed to open: /home/cc/haibin2/livejournal/random_walk/7_self/dense/Q_29
+----------- Loading graphs ------------
+Failed to open: /home/cc/haibin2/livejournal/random_walk/7_self/dense/Q_30
+----------- Loading graphs ------------
+Failed to open: /home/cc/haibin2/livejournal/random_walk/7_self/dense/Q_31
+----------- Loading graphs ------------
+Failed to open: /home/cc/haibin2/livejournal/random_walk/7_self/dense/Q_32
+----------- Loading graphs ------------
+Failed to open: /home/cc/haibin2/livejournal/random_walk/7_self/dense/Q_33
+----------- Loading graphs ------------
+Failed to open: /home/cc/haibin2/livejournal/random_walk/7_self/dense/Q_34
+----------- Loading graphs ------------
+Failed to open: /home/cc/haibin2/livejournal/random_walk/7_self/dense/Q_35
+----------- Loading graphs ------------
+Failed to open: /home/cc/haibin2/livejournal/random_walk/7_self/dense/Q_36
+----------- Loading graphs ------------
+Failed to open: /home/cc/haibin2/livejournal/random_walk/7_self/dense/Q_37
+----------- Loading graphs ------------
+Failed to open: /home/cc/haibin2/livejournal/random_walk/7_self/dense/Q_38
+----------- Loading graphs ------------
+Failed to open: /home/cc/haibin2/livejournal/random_walk/7_self/dense/Q_39
+----------- Loading graphs ------------
+# vertices = 7
+# edges = 11
+# vertices = 3072627
+# edges = 110153979
+Load Graphs: 54702.5ms
+------------ Preprocessing ------------
+matching order: 
+-vertex(backward neighbors)-
+#0: 5-3(5)-4(3,5)-0(3,4,5)-1(4,5)-2(1,5)-6(3)
+#1: 4-3(4)-5(3,4)-0(3,4,5)-1(4,5)-2(1,5)-6(3)
+#2: 4-5(4)-3(4,5)-0(3,4,5)-1(4,5)-2(1,5)-6(3)
+#3: 0-3(0)-5(0,3)-4(0,3,5)-1(4,5)-2(1,5)-6(3)
+#4: 0-4(0)-5(0,4)-3(0,4,5)-1(4,5)-2(1,5)-6(3)
+#5: 0-5(0)-3(0,5)-4(0,3,5)-1(4,5)-2(1,5)-6(3)
+#6: 1-4(1)-5(1,4)-3(4,5)-0(3,4,5)-2(1,5)-6(3)
+#7: 1-5(1)-4(1,5)-3(4,5)-0(3,4,5)-2(1,5)-6(3)
+#8: 2-1(2)-5(1,2)-4(1,5)-3(4,5)-0(3,4,5)-6(3)
+#9: 2-5(2)-1(2,5)-4(1,5)-3(4,5)-0(3,4,5)-6(3)
+#10: 6-3(6)-5(3)-4(3,5)-0(3,4,5)-1(4,5)-2(1,5)
+
+Preprocessing: 5.211ms
+--------- Incremental Matching --------
+auto_tuning off:0
+use 32 threads for incresemental matching 
+Incremental Matching: 1410.97ms
+0 vertex updates.
+7338354 edge updates.
+0 unsafe updates.
+0 positive matches.
+0 negative matches.
+
+# edges in index in total: 0
+# vertices in index in total: 0
+Peak Virtual Memory: 5518284 KB
+
+----------------- End -----------------
+----------- Loading graphs ------------
+Failed to open: /home/cc/haibin2/livejournal/random_walk/7_self/dense/Q_41
+----------- Loading graphs ------------
+Failed to open: /home/cc/haibin2/livejournal/random_walk/7_self/dense/Q_42
+----------- Loading graphs ------------
+Failed to open: /home/cc/haibin2/livejournal/random_walk/7_self/dense/Q_43
+----------- Loading graphs ------------
+Failed to open: /home/cc/haibin2/livejournal/random_walk/7_self/dense/Q_44
+----------- Loading graphs ------------
+# vertices = 7
+# edges = 13
+# vertices = 3072627
+# edges = 110153979
+Load Graphs: 52772.9ms
+------------ Preprocessing ------------
+matching order: 
+-vertex(backward neighbors)-
+#0: 2-3(2)-0(2,3)-1(0,2,3)-4(2,3)-5(2,3,4)-6(0,2)
+#1: 0-2(0)-3(0,2)-1(0,2,3)-4(2,3)-5(2,3,4)-6(0,2)
+#2: 0-3(0)-2(0,3)-1(0,2,3)-4(2,3)-5(2,3,4)-6(0,2)
+#3: 1-0(1)-2(0,1)-3(0,1,2)-4(2,3)-5(2,3,4)-6(0,2)
+#4: 1-2(1)-3(1,2)-0(1,2,3)-4(2,3)-5(2,3,4)-6(0,2)
+#5: 1-3(1)-2(1,3)-0(1,2,3)-4(2,3)-5(2,3,4)-6(0,2)
+#6: 4-2(4)-3(2,4)-5(2,3,4)-0(2,3)-1(0,2,3)-6(0,2)
+#7: 4-3(4)-2(3,4)-5(2,3,4)-0(2,3)-1(0,2,3)-6(0,2)
+#8: 5-2(5)-3(2,5)-4(2,3,5)-0(2,3)-1(0,2,3)-6(0,2)
+#9: 5-3(5)-2(3,5)-4(2,3,5)-0(2,3)-1(0,2,3)-6(0,2)
+#10: 5-4(5)-2(4,5)-3(2,4,5)-0(2,3)-1(0,2,3)-6(0,2)
+#11: 6-0(6)-2(0,6)-3(0,2)-1(0,2,3)-4(2,3)-5(2,3,4)
+#12: 6-2(6)-0(2,6)-3(0,2)-1(0,2,3)-4(2,3)-5(2,3,4)
+
+Preprocessing: 5.208ms
+--------- Incremental Matching --------
+auto_tuning off:0
+use 32 threads for incresemental matching 
+Incremental Matching: 1409.66ms
+0 vertex updates.
+7338363 edge updates.
+0 unsafe updates.
+0 positive matches.
+0 negative matches.
+
+# edges in index in total: 0
+# vertices in index in total: 0
+Peak Virtual Memory: 5517652 KB
+
+----------------- End -----------------
+----------- Loading graphs ------------
+Failed to open: /home/cc/haibin2/livejournal/random_walk/7_self/dense/Q_46
+----------- Loading graphs ------------
+Failed to open: /home/cc/haibin2/livejournal/random_walk/7_self/dense/Q_47
+----------- Loading graphs ------------
+Failed to open: /home/cc/haibin2/livejournal/random_walk/7_self/dense/Q_48
+----------- Loading graphs ------------
+Failed to open: /home/cc/haibin2/livejournal/random_walk/7_self/dense/Q_49
+----------- Loading graphs ------------
+Failed to open: /home/cc/haibin2/livejournal/random_walk/7_self/dense/Q_50

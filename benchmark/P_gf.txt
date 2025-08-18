@@ -1,0 +1,36 @@
+----------- Loading graphs ------------
+Failed to open: /home/cc/haibin2//amazon/6_self/sparse/Q_1
+Finished testing QUERY_GRAPH: /home/cc/haibin2//amazon/6_self/sparse/Q_1
+Testing with QUERY_GRAPH: /home/cc/haibin2//amazon/6_self/sparse/Q_2
+----------- Loading graphs ------------
+# vertices = 6
+# edges = 6
+# vertices = 403394
+# edges = 2199067
+Load Graphs: 1574.05ms
+------------ Preprocessing ------------
+matching order: 
+-vertex(backward neighbors)-
+#0: 0-2(0)-4(0,2)-3(2)-1(0)-5(3)
+#1: 4-0(4)-2(0,4)-3(2)-1(0)-5(3)
+#2: 4-2(4)-0(2,4)-3(2)-1(0)-5(3)
+#3: 3-2(3)-0(2)-4(0,2)-1(0)-5(3)
+#4: 1-0(1)-2(0)-4(0,2)-3(2)-5(3)
+#5: 5-3(5)-2(3)-0(2)-4(0,2)-1(0)
+
+Preprocessing: 1.235ms
+--------- Incremental Matching --------
+auto_tuning off:0
+use 32 threads for incresemental matching 
+Incremental Matching: 2407ms
+0 vertex updates.
+244356 edge updates.
+23671 unsafe updates.
+14644393 positive matches.
+0 negative matches.
+
+# edges in index in total: 0
+# vertices in index in total: 0
+Peak Virtual Memory: 2487296 KB
+
+----------------- End -----------------
