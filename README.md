@@ -5,13 +5,15 @@
 <img src="docs/img/ParaCOSM.svg" alt="paracosm" width="400" margin="10px"/>
 </p>
 
+<h2 align="center">
+ParaCOSM: Parallel Framework for Continuous Subgraph Matching
+</h2>
 
-# ParaCOSM: Parallel Framework for Continuous Subgraph Matching
 
 Haibin Lai, Sicheng Zhou, Site Fan, Zhuozhao Li*
 
 
-## Abstract
+## *Abstract*
 
 Continuous Subgraph Matching (CSM) has been widely studied, yet most single-threaded algorithms struggle with large query graphs. Existing CSM algorithms on CPU suffer from load imbalance in searching and sequential updates to the index structure.
 
@@ -19,7 +21,27 @@ In this paper, we present `ParaCOSM` (Parallel COntinuous Subgraph Matching), an
 `ParaCOSM` achieves 1.2 X to 30.2 speedups across datasets and up to two orders of magnitude faster execution, with up to 71% higher success rates on large query graphs.
 
 
-## Compile
+## *Latest News* 🔥
+
+## Update log
+
+2/8 docs 
+- dataflow.md
+- Subgraph Matching
+
+4/8 code
+
+Finish init code for 5 algorithm
+
+
+4/20 
+
+Refactor
+
+
+## Quick Start
+
+### Compile
 
 
 Our framework requires c++17 and intel icpx with onetbb. One can compile the code by executing the following commands. 
@@ -32,7 +54,7 @@ make -j
 ```
 
 
-## Execute
+### Execute
 
 After a successful compilation, the binary file is created under the `build/` directory. One can execute CSM using the following command.
 
@@ -49,10 +71,10 @@ build/csm -q <query-graph-path> -d <data-graph-path> -u <update-stream-path> -a 
 
 
 
-## Input File Format
+### Input File Format
 Both the input query graph and data graph are vertex- and edge-labeled. Each vertex is represented by a distinct unsigned integer (from 0 to 4294967295). There is at most one edge between two arbitrary vertices. 
 
-### Query Graph
+#### Query Graph
 
 Each line in the query graph file represent a vertex or an edge.
 
@@ -70,11 +92,11 @@ e 0 2 1
 e 2 1 2
 ```
 
-### Initial Data Graph
+#### Initial Data Graph
 
 The initial data graph file has the same format as the query graph file.
 
-### Graph Update Stream
+#### Graph Update Stream
 
 Graph update stream is a collection of insertions and deletions of a vertex or an edge.
 
@@ -103,20 +125,7 @@ To add your new algorithm, you only need to modify two major funcions in the acc
 
 
 
-## Update log
 
-2/8 docs 
-- dataflow.md
-- Subgraph Matching
-
-4/8 code
-
-Finish init code for 5 algorithm
-
-
-4/20 
-
-Refactor
 
 ## Dataset
 
