@@ -6,7 +6,7 @@
 </p>
 
 <h2 align="center">
-ParaCOSM: Parallel Framework for Continuous Subgraph Matching
+ParaCOSM: A Parallel Framework for Continuous Subgraph Matching
 </h2>
 
 
