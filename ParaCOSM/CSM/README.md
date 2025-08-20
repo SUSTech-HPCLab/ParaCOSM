@@ -1,4 +1,3 @@
-This repo is modified from https://github.com/RapidsAtHKUST/ContinuousSubgraphMatching
 
 # ParaCOSM: Parallel Framework for Accelerating Continuous Subgraph Matching
 
@@ -76,4 +75,9 @@ e 2 3 2
 -e 0 1 0
 ```
 
+## Acknowledgement
+
+This project codes is adapted from [ContinuousSubgraphMatching](https://github.com/RapidsAtHKUST/ContinuousSubgraphMatching), 
+which is licensed under the MIT License.  
+We would like to thank the original authors for their great work.
 

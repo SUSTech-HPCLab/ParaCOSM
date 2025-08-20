@@ -21,27 +21,18 @@ In this paper, we present `ParaCOSM` (Parallel COntinuous Subgraph Matching), an
 `ParaCOSM` achieves 1.2 X to 30.2 speedups across datasets and up to two orders of magnitude faster execution, with up to 71% higher success rates on large query graphs.
 
 
-## *Latest News* 🔥
+## Latest News
 
-## Update log
-
-2/8 docs 
-- dataflow.md
-- Subgraph Matching
-
-4/8 code
-
-Finish init code for 5 algorithm
-
-
-4/20 
-
-Refactor
-
+- [2025/08] We are excited to open source the alpha release of `ParaCOSM`!
+- [2025/07] The main documents and analysis of CSM problem are summarized. 
+- [2025/04] The main codes and structures for `ParaCOSM` are finished.
+- [2025/04] `ParaCOSM` now support `CaLiG` and `NewSP` algorithms in a parallel version.
+- [2025/03] `ParaCOSM` now support `Turboflux` and `Graphflow` algorithms in a parallel version.
+- [2025/02] `ParaCOSM` now support `Symbi` algorithm in a parallel version.
 
 ## Quick Start
 
-### Compile
+### Compiling
 
 
 Our framework requires c++17 and intel icpx with onetbb. One can compile the code by executing the following commands. 
@@ -54,7 +45,7 @@ make -j
 ```
 
 
-### Execute
+### Execution
 
 After a successful compilation, the binary file is created under the `build/` directory. One can execute CSM using the following command.
 
@@ -115,13 +106,19 @@ e 2 3 2
 ```
 
 
-## Develop guide
+## Develop Guide
 
+We welcome and value any contributions and collaborations. 
 To add your new algorithm, you only need to modify two major funcions in the according files:
 
-1. ParaCOSM/core/FindMatchesKernel
+1. ParaCOSM/matching_executor/XX
 
-2. ParaCOSM/core/SingleThreadKernel
+Here you can add your own single thread CSM algorithms, or select a base algorithm like `Graphflow` for further development.
+
+2. ParaCOSM/core/FindMatchesKernel
+
+Here you can use several parallel kernels for boosting the algorithms, or implement your own kernel using the modules.
+
 
 
 
@@ -133,3 +130,27 @@ To add your new algorithm, you only need to modify two major funcions in the acc
 The datasets and corresponding querysets used in our paper can be downloaded from
 https://drive.google.com/file/d/1GNSme2eXsNT6YCqUOoLl1UQCsoykldDY/view
 
+
+
+## Acknowledgement
+
+
+This project codes is adapted from [ContinuousSubgraphMatching](https://github.com/RapidsAtHKUST/ContinuousSubgraphMatching), 
+which is licensed under the MIT License.  
+We would like to thank the original authors for their great work.
+
+
+## Citation
+
+If you use `ParaCOSM` for your research, please cite our paper:
+
+```bibtex
+@inproceedings{lai2025paracosm,
+  author    = {Haibin, Lai and Sicheng, Zhou and Site, Fan and Zhuozhao, Li},
+  title     = {ParaCOSM: A Parallel Framework for Continuous Subgraph Matching},
+  booktitle = {54th International Conference on Parallel Processing (ICPP '25)},
+  year      = {2025},
+  location  = {San Diego, CA, USA},
+  doi       = {10.1145/3754598.3754603}
+}
+```
