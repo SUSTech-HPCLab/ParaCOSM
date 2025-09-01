@@ -25,9 +25,11 @@ ALGORITHM=parallel_symbi
 # Time limit (in seconds)
 TIME_LIMIT=1800
 
+DATA_SET_NAME=livejournal
+
 # Graph files
-DATA_GRAPH=/home/cc/haibin2/paracosm/livejournal/data_graph/data.graph
-INSERT_GRAPH=/home/cc/haibin2/paracosm/livejournal/data_graph/insertion.graph
+DATA_GRAPH=/home/cc/haibin2/paracosm/${DATA_SET_NAME}/data_graph/data.graph
+INSERT_GRAPH=/home/cc/haibin2/paracosm/${DATA_SET_NAME}/data_graph/insertion.graph
 
 # List of suffixes to test
 SUFFIXES=(6)
@@ -35,17 +37,17 @@ SUFFIXES=(6)
 # Loop over each suffix
 for SUFFIX in "${SUFFIXES[@]}"; do
     # Dataset
-    DATA_SET=amazon/${SUFFIX}
+    DATA_SET=livejournal/${SUFFIX}
 
 
 
     # Output file
-    OUTPUT=${ALGORITHM}_Amazon_${SUFFIX}_P2.txt
+    OUTPUT=${ALGORITHM}_LiveJournal_${SUFFIX}_P2.txt
 
     # Define configurations for sparse, dense, tree
     CONFIGS=(
         # "sparse ${DIR}/amazon/6/random_walk/${SUFFIX}_self/sparse"
-        "sparse /home/cc/haibin2/amazon/6/query_graph/sparse_6"
+        "sparse ${DIR}/livejournal/6/query_graph/sparse_6"
         # "dense ${DIR}/amazon/6/random_walk/${SUFFIX}_self/dense"
         # "tree ${DIR}/amazon/6/random_walk/${SUFFIX}_self/tree"
     )
@@ -62,15 +64,15 @@ for SUFFIX in "${SUFFIXES[@]}"; do
         TARGET_DIR=${OUTPUT_DIR}/${TYPE}_${SUFFIX}
         if [ ! -d "${TARGET_DIR}" ]; then
             echo "Directory ${TARGET_DIR} does not exist. Creating it..."
-            mkdir -p ${TARGET_DIR}
+            # mkdir -p ${TARGET_DIR}
         fi
 
         echo "Starting tests for ${TYPE}_${SUFFIX} with dataset ${DATA_SET}"
 
         QUERY_GRAPH_DIR=/home/cc/haibin2/paracosm/livejournal/random_walk/6_self/sparse
 
-        # Run tests for queries 1 to 99
-        for i in $(seq 0 10); do
+        # Run tests for queries 4 to 5
+        for i in $(seq 3 3); do
             QUERY_GRAPH=${QUERY_GRAPH_DIR}/Q_${i}
 
             echo "Testing with QUERY_GRAPH: $QUERY_GRAPH"
@@ -83,7 +85,7 @@ for SUFFIX in "${SUFFIXES[@]}"; do
             #         >> ${TARGET_DIR}/${OUTPUT}
             # else
                 # Sparse and dense use standard command
-                timeout --kill-after=5 3600 ./build/csm -a ${ALGORITHM} -d ${DATA_GRAPH} -u ${INSERT_GRAPH} -q ${QUERY_GRAPH} \
+                timeout --kill-after=5 3600 ./build/bin/csm -a ${ALGORITHM} -d ${DATA_GRAPH} -u ${INSERT_GRAPH} -q ${QUERY_GRAPH} \
                     --time-limit ${TIME_LIMIT} --report-initial off -t ${THREADS} --auto-tuning 0
                     
             # fi
