@@ -39,6 +39,7 @@ Our framework requires c++17 and intel icpx with onetbb. One can compile the cod
 
 ```shell
 source /path/to/intel/oneAPI/setvars.sh
+cd ParaCOSM/CSM/
 mkdir build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
 make -j
