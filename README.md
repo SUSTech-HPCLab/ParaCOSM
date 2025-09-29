@@ -23,6 +23,9 @@ In this paper, we present `ParaCOSM` (Parallel COntinuous Subgraph Matching), an
 
 ## Latest News
 
+- [2025/09] `ParaCOSM` won CCFSys2025 Graph Computing Challenge with `excellent` prize. 
+- [2025/09] `ParaCOSM` announce path for developing plan 1.1 .
+- [2025/09] `ParaCOSM` is presented in 54th International Conference on Parallel Processing (ICPP25)!
 - [2025/08] We are excited to open source the alpha release of `ParaCOSM`!
 - [2025/07] The main documents and analysis of CSM problem are summarized. 
 - [2025/04] The main codes and structures for `ParaCOSM` are finished.
