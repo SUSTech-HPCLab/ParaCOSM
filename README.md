@@ -150,7 +150,7 @@ If you use `ParaCOSM` for your research, please cite our paper:
 
 ```bibtex
 @inproceedings{lai2025paracosm,
-  author    = {Haibin, Lai and Sicheng, Zhou and Site, Fan and Zhuozhao, Li},
+  author    = {Haibin Lai and Sicheng Zhou and Site Fan and Zhuozhao Li},
   title     = {ParaCOSM: A Parallel Framework for Continuous Subgraph Matching},
   booktitle = {54th International Conference on Parallel Processing (ICPP '25)},
   year      = {2025},
