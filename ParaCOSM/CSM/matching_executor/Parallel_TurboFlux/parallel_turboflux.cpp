@@ -1206,40 +1206,120 @@ inline void Parallel_TurboFlux::Parallel_FindMatches(uint order_index, uint dept
         }
     }
 
-    #pragma omp parallel for num_threads(NUMT)
-    for(size_t i =0; i < vertex_vector.size(); ++i){
-        auto& [u3, u_min2, v_idx2, m2, v3] = vertex_vector[i];
+    // #pragma omp parallel for num_threads(NUMT)
+    // for(size_t i =0; i < vertex_vector.size(); ++i){
+    //     auto& [u3, u_min2, v_idx2, m2, v3] = vertex_vector[i];
+    //     size_t thread_id = omp_get_thread_num();
+    //     // visited_[v3] = true;
+    //     // m2[u3] = v3;
+    //     local_vec_visited_local[thread_id][v3] = true;
+    //     m2[u3] = v3;
+
+    //     // ProcessVertex(u3, u_min2, v_idx2, m2, local_num_result[thread_id], 
+    //     //     depth + 1, order_index, thread_id);
+
+    //     ProcessVertex_queue(u3, u_min2, v_idx2, m2, local_num_result[thread_id], 
+    //         depth + 1, order_index, thread_id);
+
+    //     // visited_[v3] = false;
+    //     // m2[u3] = UNMATCHED;
+    //     local_vec_visited_local[thread_id][v3] = false;
+    //     m2[u3] = UNMATCHED;
+
+    //     if(!job_queue.empty() && (i <= vertex_vector.size() - NUMT)){
+    //         std::tuple<uint, uint, size_t, std::vector<uint>,
+    //              uint , uint> job;
+    //         if(job_queue.try_pop(job)){
+    //             size_t thread_id = omp_get_thread_num();
+    //             auto& [u3, u_min2, v_idx2, m2, depth3, v3] = job;
+    //             local_vec_visited_local[thread_id][v3] = true;
+    //             m2[u] = v3;
+    //             ProcessVertex_queue(u3, u_min2, v_idx2, m2, local_num_result[thread_id], 
+    //                 depth3, order_index, thread_id);
+    //             local_vec_visited_local[thread_id][v3] = false; 
+    //             m2[u] = UNMATCHED;
+    //         }
+    //     }
+    // }
+
+        #pragma omp parallel
+    {
+
+        bool all_finished = false;
         size_t thread_id = omp_get_thread_num();
-        // visited_[v3] = true;
-        // m2[u3] = v3;
-        local_vec_visited_local[thread_id][v3] = true;
-        m2[u3] = v3;
 
-        // ProcessVertex(u3, u_min2, v_idx2, m2, local_num_result[thread_id], 
-        //     depth + 1, order_index, thread_id);
+        size_t base = vertex_vector.size() / NUMT;
+        size_t rem  = vertex_vector.size() % NUMT;
 
-        ProcessVertex_queue(u3, u_min2, v_idx2, m2, local_num_result[thread_id], 
-            depth + 1, order_index, thread_id);
+        size_t start, end;
+        if (thread_id < rem) {
+            start = thread_id * (base + 1);
+            end   = start + (base + 1);
+        } else {
+            start = rem * (base + 1) + (thread_id - rem) * base;
+            end   = start + base;
+        }
 
-        // visited_[v3] = false;
-        // m2[u3] = UNMATCHED;
-        local_vec_visited_local[thread_id][v3] = false;
-        m2[u3] = UNMATCHED;
+        if (start > vertex_vector.size()) start = vertex_vector.size();
+        if (end   > vertex_vector.size()) end   = vertex_vector.size();
 
-        if(!job_queue.empty() && (i <= vertex_vector.size() - NUMT)){
+        for(size_t i = start; i < end; ++i){ 
+            auto& [u3, u_min2, v_idx2, m2,  v3] = vertex_vector[i];
+            local_vec_visited_local[thread_id][v3] = true;
+            m2[u3] = v3;
+            // search + share jobs if possible
+            ProcessVertex_queue(u3, u_min2, v_idx2, m2, local_num_result[thread_id], 
+                depth + 1, order_index, thread_id);
+        }
+
+        // finish its job
+        workers_free[thread_id] = true;
+
+        while (!all_finished)
+        {
             std::tuple<uint, uint, size_t, std::vector<uint>,
-                 uint , uint> job;
+                    uint , uint> job;
+            while (!job_queue.empty())
+            {
+                if(job_queue.try_pop(job)){
+                    size_t thread_id = omp_get_thread_num();
+                    auto& [u3, u_min2, v_idx2, m2, depth3, v3] = job;
+                    local_vec_visited_local[thread_id][v3] = true;
+                    m2[u3] = v3;
+                    ProcessVertex(u3, u_min2, v_idx2, m2, local_num_result[thread_id], 
+                            depth3, order_index, thread_id);
+                    local_vec_visited_local[thread_id][v3] = false; 
+                    m2[u3] = UNMATCHED;
+                }
+            }
+            
+            int finished_count = 0;
+            for(int i = 0; i < NUMT; ++i){
+                if(workers_free[i] == true){
+                    finished_count++;
+                }
+            }
+            if(finished_count == NUMT){
+                all_finished = true;
+            }
+        }
+        
+        std::tuple<uint, uint, size_t, std::vector<uint>,
+                    uint , uint> job;
+        while (!job_queue.empty())
+        {
             if(job_queue.try_pop(job)){
                 size_t thread_id = omp_get_thread_num();
                 auto& [u3, u_min2, v_idx2, m2, depth3, v3] = job;
                 local_vec_visited_local[thread_id][v3] = true;
-                m2[u] = v3;
-                ProcessVertex_queue(u3, u_min2, v_idx2, m2, local_num_result[thread_id], 
-                    depth3, order_index, thread_id);
+                m2[u3] = v3;
+                ProcessVertex(u3, u_min2, v_idx2, m2, local_num_result[thread_id], 
+                            depth3, order_index, thread_id);
                 local_vec_visited_local[thread_id][v3] = false; 
-                m2[u] = UNMATCHED;
+                m2[u3] = UNMATCHED;
             }
         }
+        
     }
 
     for (size_t i = 0; i < local_num_result.size(); ++i) {
