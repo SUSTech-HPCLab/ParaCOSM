@@ -31,6 +31,10 @@ private:
     std::vector<std::vector<uint>> order_vs_;
     std::vector<std::vector<uint>> backward_vs_;
 
+    std::vector<bool> workers_free;
+
+    bool all_finish = false;
+
     std::vector<std::vector<std::vector<uint>>> join_check_vs_;
     std::vector<std::vector<std::vector<uint>>> join_check_labels_;
 

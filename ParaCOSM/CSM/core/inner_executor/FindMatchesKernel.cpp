@@ -262,7 +262,7 @@ inline bool process_vertex_layer1_simplified(
         // __builtin_prefetch(&DCS_[eidx_[u_min][u]][m[u_min]][v_idx], 1, 0);
 
         // #ifdef TASK_SPILT
-                 if(query_graph.NumVertices() < 7){
+        if(query_graph.NumVertices() < 7){
              Parallel_FindMatches_local3_simplified(depth + 1, m, temp_extendable, num_results, thread_id,
                  query_graph, data_graph, eidx, DCS, d2, n2, local_vec_visited_local, homomorphism, treeNode_neighbors);
          }else{
@@ -273,9 +273,6 @@ inline bool process_vertex_layer1_simplified(
         }else{
 
             // the place for task spilt 
-
-
-
 
             // if(kongxian){spilt, 逻辑如下:}
 
