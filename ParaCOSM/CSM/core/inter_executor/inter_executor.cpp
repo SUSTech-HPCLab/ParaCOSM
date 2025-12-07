@@ -318,9 +318,9 @@ void InterExecutor::BatchUpdates_OpenMP(
             num_e_updates += window_size;
         }
 
-        if ((update_size - sliding_window_base) % (update_size / 10) < (window_size - 1)) {
-            std::cout << "update progress: " << (sliding_window_base) * 100 / update_size << "%" << std::endl;
-        }
+        // if ((update_size - sliding_window_base) % (update_size / 10) < (window_size - 1)) {
+        //     std::cout << "update progress: " << (sliding_window_base) * 100 / update_size << "%" << std::endl;
+        // }
     }
 }
 
