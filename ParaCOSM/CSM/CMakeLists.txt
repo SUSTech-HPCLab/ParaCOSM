@@ -3,7 +3,8 @@ cmake_minimum_required(VERSION 3.16)
 # -----------------------------
 # 1. Set Intel oneAPI compiler
 # -----------------------------
-set(INTEL_COMPILER_ROOT /data/haibin/intel/oneapi/compiler/2025.0)
+set(ONEAPI_ROOT /data/haibin/intel/oneapi)
+set(INTEL_COMPILER_ROOT ${ONEAPI_ROOT}/compiler/2025.0)
 set(CMAKE_CXX_COMPILER ${INTEL_COMPILER_ROOT}/bin/icpx)
 set(CMAKE_LINKER ${INTEL_COMPILER_ROOT}/bin/icpx)
 
@@ -30,7 +31,6 @@ add_compile_options(
 # -----------------------------
 # 4. Intel TBB paths
 # -----------------------------
-set(ONEAPI_ROOT /home/cc/intel/oneapi)
 set(TBB_ROOT ${ONEAPI_ROOT}/tbb/latest)
 set(TBB_INC ${TBB_ROOT}/include)
 set(TBB_LIB_DIR ${TBB_ROOT}/lib/intel64/gcc4.8)
