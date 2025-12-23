@@ -132,7 +132,7 @@ Here you can use several parallel kernels for boosting the algorithms, or implem
 
 
 The datasets and corresponding querysets used in our paper can be downloaded from
-https://drive.google.com/file/d/1GNSme2eXsNT6YCqUOoLl1UQCsoykldDY/view
+https://drive.google.com/drive/folders/1TufsHlMTar7gajpdRIu188P2VqBYdlL_?usp=sharing
 
 
 
