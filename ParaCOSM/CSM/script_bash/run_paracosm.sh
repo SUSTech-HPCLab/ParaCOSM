@@ -13,19 +13,17 @@ export LD_LIBRARY_PATH=/home/cc/intel/oneapi/tbb/latest/lib:${LD_LIBRARY_PATH}
 # -----------------------------------------------------------------------------
 # Global paths and dataset
 # -----------------------------------------------------------------------------
-BASE_DIR=/your/path/to/ParaCOSM
+BASE_DIR=
 # Optional dataset: livejournal, amazon, orkut, lsbench
-DATA_SET_NAME=livejournal
-DATA_GRAPH=${BASE_DIR}/paracosm/${DATA_SET_NAME}/data_graph/data.graph
-INSERT_GRAPH=${BASE_DIR}/paracosm/${DATA_SET_NAME}/data_graph/insertion.graph
+DATA_SET_NAME=amazon_dataset
 
 # -----------------------------------------------------------------------------
 # Algorithm and run parameters
 # -----------------------------------------------------------------------------
 # Algorithm: parallel_symbi, parallel_turboflux, parallel_graphflow
-ALGORITHM=parallel_symbi
+ALGORITHM=parallel_graphflow
 TIME_LIMIT=1800
-THREADS=32
+THREADS=8
 RUN_TIMEOUT=3600
 
 # Optional: output directory (leave empty to print to terminal only)
@@ -40,20 +38,27 @@ SUFFIXES=(6)
 get_configs() {
     local suffix=$1
     # Uncomment or add more configs as needed
-    echo "sparse ${BASE_DIR}/livejournal/6/query_graph/sparse_6"
+    echo "sparse ${BASE_DIR}/paracosm/${DATA_SET_NAME}/${suffix}_self/sparse"
+    # echo "dense  ${BASE_DIR}/paracosm/${DATA_SET_NAME}/${suffix}_self/dense"
+    # echo "tree   ${BASE_DIR}/paracosm/${DATA_SET_NAME}/${suffix}_self/tree"
     # echo "sparse ${BASE_DIR}/livejournal/random_walk/6_self/sparse"
     # echo "dense  ${BASE_DIR}/livejournal/6/random_walk/${suffix}_self/dense"
     # echo "tree   ${BASE_DIR}/livejournal/6/random_walk/${suffix}_self/tree"
 }
 
 # Query IDs to run (currently only Q_3)
-QUERY_IDS=(3)
+QUERY_IDS=(11)
 # For a range use: QUERY_IDS=($(seq 3 5))
 
 # -----------------------------------------------------------------------------
 # Main loop
 # -----------------------------------------------------------------------------
+TOTAL_RUNS=0
+FAILED_RUNS=0
+
 for SUFFIX in "${SUFFIXES[@]}"; do
+    DATA_GRAPH=${BASE_DIR}/paracosm/${DATA_SET_NAME}/${SUFFIX}/data_graph/data.graph
+    INSERT_GRAPH=${BASE_DIR}/paracosm/${DATA_SET_NAME}/${SUFFIX}/data_graph/insertion.graph
     DATA_SET=${DATA_SET_NAME}/${SUFFIX}
     OUTPUT_FILE="${ALGORITHM}_${DATA_SET_NAME}_${SUFFIX}.txt"
 
@@ -76,6 +81,13 @@ for SUFFIX in "${SUFFIXES[@]}"; do
             QUERY_GRAPH="${QUERY_GRAPH_DIR}/Q_${i}"
             echo "Running QUERY_GRAPH: ${QUERY_GRAPH}"
 
+            if [ ! -e "${QUERY_GRAPH}" ]; then
+                echo "[ERROR] Query graph not found: ${QUERY_GRAPH}"
+                TOTAL_RUNS=$((TOTAL_RUNS + 1))
+                FAILED_RUNS=$((FAILED_RUNS + 1))
+                continue
+            fi
+
             # timeout: run up to RUN_TIMEOUT seconds; after SIGTERM wait 5s then SIGKILL
             CMD=(
                 timeout --kill-after=5 "${RUN_TIMEOUT}"
@@ -90,13 +102,24 @@ for SUFFIX in "${SUFFIXES[@]}"; do
                 --auto-tuning 0
             )
 
+            TOTAL_RUNS=$((TOTAL_RUNS + 1))
             if [ -n "${TARGET_DIR}" ]; then
-                "${CMD[@]}" >> "${TARGET_DIR}/${OUTPUT_FILE}"
+                if "${CMD[@]}" >> "${TARGET_DIR}/${OUTPUT_FILE}" 2>&1; then
+                    echo "Done: ${QUERY_GRAPH}"
+                else
+                    EXIT_CODE=$?
+                    FAILED_RUNS=$((FAILED_RUNS + 1))
+                    echo "[ERROR] Failed (${EXIT_CODE}): ${QUERY_GRAPH}" | tee -a "${TARGET_DIR}/${OUTPUT_FILE}"
+                fi
             else
-                "${CMD[@]}"
+                if "${CMD[@]}"; then
+                    echo "Done: ${QUERY_GRAPH}"
+                else
+                    EXIT_CODE=$?
+                    FAILED_RUNS=$((FAILED_RUNS + 1))
+                    echo "[ERROR] Failed (${EXIT_CODE}): ${QUERY_GRAPH}"
+                fi
             fi
-
-            echo "Done: ${QUERY_GRAPH}"
         done
 
         echo "Completed config: ${TYPE}_${SUFFIX}"
@@ -104,3 +127,4 @@ for SUFFIX in "${SUFFIXES[@]}"; do
 done
 
 echo "All tests completed: ${ALGORITHM}, suffixes ${SUFFIXES[*]}"
+echo "Summary: total=${TOTAL_RUNS}, failed=${FAILED_RUNS}, success=$((TOTAL_RUNS - FAILED_RUNS))"
