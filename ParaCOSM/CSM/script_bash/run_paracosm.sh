@@ -8,6 +8,7 @@ set -e
 # -----------------------------------------------------------------------------
 # Environment and library path
 # -----------------------------------------------------------------------------
+source /path/to/intel/oneapi/setvars.sh
 export LD_LIBRARY_PATH=/path/to/intel/oneapi/tbb/latest/lib:${LD_LIBRARY_PATH}
 
 # -----------------------------------------------------------------------------
