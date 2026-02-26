@@ -16,7 +16,7 @@ project(CSM LANGUAGES CXX)
 # -----------------------------
 # 3. Compilation options
 # -----------------------------
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Common optimizations and warnings
