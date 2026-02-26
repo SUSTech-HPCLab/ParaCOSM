@@ -27,7 +27,7 @@ THREADS=8
 RUN_TIMEOUT=3600
 
 # Optional: output directory (leave empty to print to terminal only)
-OUTPUT_DIR=""
+OUTPUT_DIR="logs_txt/amazon/parallel_graphflow"
 # OUTPUT_DIR=logs_txt/livejournal/Graphflow
 
 # -----------------------------------------------------------------------------
@@ -47,7 +47,7 @@ get_configs() {
 }
 
 # Query IDs to run (currently only Q_3)
-QUERY_IDS=(11)
+QUERY_IDS=($(seq 3 20))
 # For a range use: QUERY_IDS=($(seq 3 5))
 
 # -----------------------------------------------------------------------------
@@ -55,6 +55,7 @@ QUERY_IDS=(11)
 # -----------------------------------------------------------------------------
 TOTAL_RUNS=0
 FAILED_RUNS=0
+SKIPPED_RUNS=0
 
 for SUFFIX in "${SUFFIXES[@]}"; do
     DATA_GRAPH=${BASE_DIR}/paracosm/${DATA_SET_NAME}/${SUFFIX}/data_graph/data.graph
@@ -79,14 +80,13 @@ for SUFFIX in "${SUFFIXES[@]}"; do
 
         for i in "${QUERY_IDS[@]}"; do
             QUERY_GRAPH="${QUERY_GRAPH_DIR}/Q_${i}"
-            echo "Running QUERY_GRAPH: ${QUERY_GRAPH}"
-
             if [ ! -e "${QUERY_GRAPH}" ]; then
-                echo "[ERROR] Query graph not found: ${QUERY_GRAPH}"
                 TOTAL_RUNS=$((TOTAL_RUNS + 1))
-                FAILED_RUNS=$((FAILED_RUNS + 1))
+                SKIPPED_RUNS=$((SKIPPED_RUNS + 1))
                 continue
             fi
+
+            echo "Running QUERY_GRAPH: ${QUERY_GRAPH}"
 
             # timeout: run up to RUN_TIMEOUT seconds; after SIGTERM wait 5s then SIGKILL
             CMD=(
@@ -127,4 +127,4 @@ for SUFFIX in "${SUFFIXES[@]}"; do
 done
 
 echo "All tests completed: ${ALGORITHM}, suffixes ${SUFFIXES[*]}"
-echo "Summary: total=${TOTAL_RUNS}, failed=${FAILED_RUNS}, success=$((TOTAL_RUNS - FAILED_RUNS))"
+echo "Summary: total=${TOTAL_RUNS}, failed=${FAILED_RUNS}, skipped=${SKIPPED_RUNS}, success=$((TOTAL_RUNS - FAILED_RUNS - SKIPPED_RUNS))"
