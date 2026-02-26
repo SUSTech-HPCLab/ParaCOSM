@@ -8,7 +8,7 @@ set -e
 # -----------------------------------------------------------------------------
 # Environment and library path
 # -----------------------------------------------------------------------------
-export LD_LIBRARY_PATH=/home/cc/intel/oneapi/tbb/latest/lib:${LD_LIBRARY_PATH}
+export LD_LIBRARY_PATH=/path/to/intel/oneapi/tbb/latest/lib:${LD_LIBRARY_PATH}
 
 # -----------------------------------------------------------------------------
 # Global paths and dataset
