@@ -1,7 +1,10 @@
 #ifndef MATCHING_PARALLEL_GRAPHFLOW
 #define MATCHING_PARALLEL_GRAPHFLOW
 
+#include <mutex>
 #include <vector>
+
+#include <taskflow/taskflow.hpp>
 
 #include "utils/types.h"
 #include "graph_storage/graph.h"
@@ -37,6 +40,8 @@ private:
 
     tbb::concurrent_queue< std::tuple<uint, uint, uint,  std::vector<uint>,  uint > > job_queue;
 
+    mutable std::mutex enum_result_mutex_;
+
     size_t NUMTHREAD;
     size_t auto_tuning;
 
@@ -53,6 +58,9 @@ public:
 
     void AddEdge(uint v1, uint v2, uint label) override;
     void RemoveEdge(uint v1, uint v2) override;
+
+    void AddEdgeWithSubflow(uint v1, uint v2, uint label, tf::Subflow& sf);
+    void RemoveEdgeWithSubflow(uint v1, uint v2, tf::Subflow& sf);
     void AddVertex(uint id, uint label) override;
     void RemoveVertex(uint id) override;
     
@@ -62,6 +70,27 @@ private:
     void GenerateMatchingOrder();
     void FindMatches(uint order_index, uint depth,
             std::vector<uint> m, size_t &num_results);
+
+        void taskflow_findmatches(uint order_index, uint depth,
+            std::vector<uint> m, size_t &num_results);
+
+        // Taskflow-based matching where candidates at a layer are
+        // partitioned into groups, and each task is responsible for
+        // processing a group of candidates (possibly exploring multiple
+        // deeper layers sequentially within the same task).
+        void taskflow_findmatches_layer(
+            uint order_index,
+            uint depth,
+            std::vector<uint> m,
+            size_t &num_results);
+
+        void taskflow_findmatches_subflow(uint order_index, uint depth,
+            std::vector<uint> m, std::vector<bool> visited,
+            size_t &num_results, tf::Subflow& sf);
+
+        void FindMatches_taskflow_local(uint order_index, uint depth,
+            std::vector<uint> &m, std::vector<bool> &visited_local,
+            size_t &num_results, size_t local_limit);
 
     // ParaCOSM kernel entry (defined in core/FindMatchesKernel.cpp)
     void Parallel_Graphflow_FindMatches_ParaCOSM_Kernel(

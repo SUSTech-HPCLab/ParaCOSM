@@ -1,5 +1,7 @@
 #include <algorithm>
+#include <atomic>
 #include <iostream>
+#include <mutex>
 #include <vector>
 
 #include <omp.h> // for openmp
@@ -10,6 +12,8 @@
 #include "graph_storage/graph.h"
 #include "matching_executor/Parallel_GraphFlow/parallel_graphflow.h"
 #include "core/inner_executor/FindMatchesKernel.h"
+// for taskflow
+#include <taskflow/taskflow.hpp>
 
 Parallel_Graphflow::Parallel_Graphflow(Graph& query_graph, Graph& data_graph, 
         uint max_num_results,
@@ -390,6 +394,345 @@ void Parallel_Graphflow::FindMatches(uint order_index, uint depth, std::vector<u
     if (candidate_empty) num_intermediate_results_with_empty_candidate_set_++;
 }
 
+
+void Parallel_Graphflow::FindMatches_taskflow_local(
+    uint order_index,
+    uint depth,
+    std::vector<uint> &m,
+    std::vector<bool> &visited_local,
+    size_t &num_results,
+    size_t local_limit)
+{
+    if (reach_time_limit) return;
+    if (num_results >= local_limit) return;
+
+    uint u = order_vs_[order_index][depth];
+    uint u_min = NOT_EXIST;
+    uint u_min_label = NOT_EXIST;
+    uint u_min_size = UINT_MAX;
+
+    const auto& q_nbrs = query_.GetNeighbors(u);
+    const auto& q_nbr_labels = query_.GetNeighborLabels(u);
+
+    for (uint i = 0u; i < q_nbrs.size(); i++)
+    {
+        const uint u_other = q_nbrs[i];
+        const uint u_other_label = q_nbr_labels[i];
+
+        if (m[u_other] == UNMATCHED) continue;
+
+        const uint cur_can_size = data_.GetNeighbors(m[u_other]).size();
+        if (cur_can_size < u_min_size)
+        {
+            u_min_size = cur_can_size;
+            u_min = u_other;
+            u_min_label = u_other_label;
+        }
+    }
+
+    const auto& u_min_nbrs = data_.GetNeighbors(m[u_min]);
+    const auto& u_min_nbr_labels = data_.GetNeighborLabels(m[u_min]);
+
+    for (uint i = 0u; i < u_min_nbrs.size(); i++)
+    {
+        const uint v = u_min_nbrs[i];
+
+        if (
+            data_.GetVertexLabel(v) != query_.GetVertexLabel(u) ||
+            u_min_nbr_labels[i] != u_min_label
+        ) continue;
+
+        bool joinable = true;
+        for (uint j = 0u; j < q_nbrs.size(); j++)
+        {
+            const uint u_other = q_nbrs[j];
+            const uint u_other_labels = q_nbr_labels[j];
+
+            if (m[u_other] == UNMATCHED || u_other == u_min) continue;
+
+            auto it = std::lower_bound(data_.GetNeighbors(m[u_other]).begin(), data_.GetNeighbors(m[u_other]).end(), v);
+            uint dis = std::distance(data_.GetNeighbors(m[u_other]).begin(), it);
+            if (
+                it == data_.GetNeighbors(m[u_other]).end() ||
+                *it != v ||
+                data_.GetNeighborLabels(m[u_other])[dis] != u_other_labels
+            ) {
+                joinable = false;
+                break;
+            }
+        }
+        if (!joinable) continue;
+
+        if (!homomorphism_ && visited_local[v]) continue;
+
+        m[u] = v;
+        visited_local[v] = true;
+
+        if (depth == query_.NumVertices() - 1)
+        {
+            num_results++;
+        }
+        else
+        {
+            FindMatches_taskflow_local(order_index, depth + 1, m, visited_local, num_results, local_limit);
+        }
+
+        visited_local[v] = false;
+        m[u] = UNMATCHED;
+
+        if (num_results >= local_limit) return;
+        if (reach_time_limit) return;
+    }
+}
+
+/**
+ * @brief 占位实现：当前直接调用传统递归 FindMatches。
+ *
+ * 目前为了验证 BatchUpdates4 和增量匹配正确性，这个函数只是
+ * 一个简单的包装，把 AddEdge / RemoveEdge 中构造好的部分映射 m
+ * 直接交给原始的 FindMatches 递归枚举。后续如果要在这一层做
+ * taskflow 分层并行，可以在这里替换为真正的 taskflow 版本。
+ */
+void Parallel_Graphflow::taskflow_findmatches_layer(
+    uint order_index,
+    uint depth,
+    std::vector<uint> m,
+    size_t &num_results)
+{
+    FindMatches(order_index, depth, m, num_results);
+}
+
+/**
+ * @brief 内层 Subflow 版本：用 tf::Subflow 动态展开递归搜索。
+ *
+ * 每一层的 candidates 用 subflow.emplace 生成子任务，子任务内递归调用
+ * taskflow_findmatches_subflow，实现「跑起来后继续加 task」的 Dynamic Traversal。
+ */
+void Parallel_Graphflow::taskflow_findmatches_subflow(
+    uint order_index,
+    uint depth,
+    std::vector<uint> m,
+    std::vector<bool> visited,
+    size_t &num_results,
+    tf::Subflow& sf)
+{
+    if (reach_time_limit) return;
+    if (num_results >= max_num_results_) return;
+
+    uint u = order_vs_[order_index][depth];
+    uint u_min = NOT_EXIST;
+    uint u_min_label = NOT_EXIST;
+    uint u_min_size = UINT_MAX;
+
+    const auto& q_nbrs = query_.GetNeighbors(u);
+    const auto& q_nbr_labels = query_.GetNeighborLabels(u);
+
+    for (uint i = 0u; i < q_nbrs.size(); i++)
+    {
+        const uint u_other = q_nbrs[i];
+        const uint u_other_label = q_nbr_labels[i];
+        if (m[u_other] == UNMATCHED) continue;
+        const uint cur_can_size = data_.GetNeighbors(m[u_other]).size();
+        if (cur_can_size < u_min_size)
+        {
+            u_min_size = cur_can_size;
+            u_min = u_other;
+            u_min_label = u_other_label;
+        }
+    }
+
+    const auto& u_min_nbrs = data_.GetNeighbors(m[u_min]);
+    const auto& u_min_nbr_labels = data_.GetNeighborLabels(m[u_min]);
+
+    std::vector<uint> candidates;
+    candidates.reserve(u_min_nbrs.size());
+
+    for (uint i = 0u; i < u_min_nbrs.size(); i++)
+    {
+        const uint v = u_min_nbrs[i];
+        if (
+            data_.GetVertexLabel(v) != query_.GetVertexLabel(u) ||
+            u_min_nbr_labels[i] != u_min_label
+        ) continue;
+
+        bool joinable = true;
+        for (uint j = 0u; j < q_nbrs.size(); j++)
+        {
+            const uint u_other = q_nbrs[j];
+            const uint u_other_labels = q_nbr_labels[j];
+            if (m[u_other] == UNMATCHED || u_other == u_min) continue;
+            auto it = std::lower_bound(data_.GetNeighbors(m[u_other]).begin(), data_.GetNeighbors(m[u_other]).end(), v);
+            uint dis = std::distance(data_.GetNeighbors(m[u_other]).begin(), it);
+            if (
+                it == data_.GetNeighbors(m[u_other]).end() ||
+                *it != v ||
+                data_.GetNeighborLabels(m[u_other])[dis] != u_other_labels
+            )
+            {
+                joinable = false;
+                break;
+            }
+        }
+        if (!joinable) continue;
+        if (!homomorphism_ && visited[v]) continue;
+        candidates.push_back(v);
+    }
+
+    if (candidates.empty()) return;
+
+    for (uint v : candidates)
+    {
+        sf.emplace([this, order_index, depth, m, visited, v, u, &num_results](tf::Subflow& inner_sf)
+        {
+            if (reach_time_limit) return;
+            if (num_results >= max_num_results_) return;
+
+            std::vector<uint> m_local = m;
+            std::vector<bool> visited_local = visited;
+            m_local[u] = v;
+            visited_local[v] = true;
+
+            if (depth == query_.NumVertices() - 1)
+            {
+                std::lock_guard<std::mutex> lock(enum_result_mutex_);
+                if (num_results >= max_num_results_) return;
+                num_results++;
+            }
+            else
+            {
+                taskflow_findmatches_subflow(order_index, depth + 1, m_local, visited_local, num_results, inner_sf);
+            }
+        });
+    }
+}
+
+
+void Parallel_Graphflow::taskflow_findmatches(uint order_index, uint depth, std::vector<uint> m, size_t &num_results)
+{
+    if (reach_time_limit) return;
+    if (num_results >= max_num_results_) return;
+
+    uint u = order_vs_[order_index][depth];
+    uint u_min = NOT_EXIST;
+    uint u_min_label = NOT_EXIST;
+    uint u_min_size = UINT_MAX;
+
+    const auto& q_nbrs = query_.GetNeighbors(u);
+    const auto& q_nbr_labels = query_.GetNeighborLabels(u);
+
+    for (uint i = 0u; i < q_nbrs.size(); i++)
+    {
+        const uint u_other = q_nbrs[i];
+        const uint u_other_label = q_nbr_labels[i];
+
+        if (m[u_other] == UNMATCHED) continue;
+
+        const uint cur_can_size = data_.GetNeighbors(m[u_other]).size();
+        if (cur_can_size < u_min_size)
+        {
+            u_min_size = cur_can_size;
+            u_min = u_other;
+            u_min_label = u_other_label;
+        }
+    }
+
+    const auto& u_min_nbrs = data_.GetNeighbors(m[u_min]);
+    const auto& u_min_nbr_labels = data_.GetNeighborLabels(m[u_min]);
+
+    std::vector<uint> candidates;
+    candidates.reserve(u_min_nbrs.size());
+
+    for (uint i = 0u; i < u_min_nbrs.size(); i++)
+    {
+        const uint v = u_min_nbrs[i];
+
+        if (
+            data_.GetVertexLabel(v) != query_.GetVertexLabel(u) ||
+            u_min_nbr_labels[i] != u_min_label
+        ) continue;
+
+        bool joinable = true;
+        for (uint j = 0u; j < q_nbrs.size(); j++)
+        {
+            const uint u_other = q_nbrs[j];
+            const uint u_other_labels = q_nbr_labels[j];
+
+            if (m[u_other] == UNMATCHED || u_other == u_min) continue;
+
+            auto it = std::lower_bound(data_.GetNeighbors(m[u_other]).begin(), data_.GetNeighbors(m[u_other]).end(), v);
+            uint dis = std::distance(data_.GetNeighbors(m[u_other]).begin(), it);
+            if (
+                it == data_.GetNeighbors(m[u_other]).end() ||
+                *it != v ||
+                data_.GetNeighborLabels(m[u_other])[dis] != u_other_labels
+            ) {
+                joinable = false;
+                break;
+            }
+        }
+        if (!joinable) continue;
+
+        if (!homomorphism_ && visited_[v]) continue;
+        candidates.push_back(v);
+    }
+
+    if (candidates.empty()) return;
+
+    tf::Executor executor(NUMTHREAD > 0 ? NUMTHREAD : 1);
+    tf::Taskflow taskflow;
+    std::mutex result_mutex;
+    std::atomic<bool> stop(false);
+
+    for (uint v : candidates)
+    {
+        taskflow.emplace(
+            [&, v]()
+            {
+                if (stop.load(std::memory_order_relaxed) || reach_time_limit) return;
+
+                std::vector<uint> m_local = m;
+                std::vector<bool> visited_local = visited_;
+                m_local[u] = v;
+                visited_local[v] = true;
+
+                size_t local_results = 0;
+                if (depth == query_.NumVertices() - 1)
+                {
+                    local_results = 1;
+                }
+                else
+                {
+                    FindMatches_taskflow_local(
+                        order_index,
+                        depth + 1,
+                        m_local,
+                        visited_local,
+                        local_results,
+                        max_num_results_
+                    );
+                }
+
+                if (local_results == 0) return;
+
+                std::lock_guard<std::mutex> lock(result_mutex);
+                if (num_results >= max_num_results_)
+                {
+                    stop.store(true, std::memory_order_relaxed);
+                    return;
+                }
+
+                const size_t remain = max_num_results_ - num_results;
+                num_results += std::min(local_results, remain);
+                if (num_results >= max_num_results_)
+                {
+                    stop.store(true, std::memory_order_relaxed);
+                }
+            }
+        );
+    }
+
+    executor.run(taskflow).wait();
+}
 
 /**
  * @brief Recursively finds all matches for a query graph in the data graph.
@@ -2087,8 +2430,7 @@ void Parallel_Graphflow::AddEdge(uint v1, uint v2, uint label)
                 local_vec_visited_local[i][v2] = true; 
             }
 
-            // Parallel_FindMatches2(i, 2, m, num_results);
-            Parallel_Graphflow_FindMatches_ParaCOSM_Kernel(i, 2, m, num_results);
+            taskflow_findmatches_layer(i, 2, m, num_results);
 
             for(size_t i = 0; i< local_vec_visited_local.size(); i++){
                 local_vec_visited_local[i][v1] = false;
@@ -2119,8 +2461,7 @@ void Parallel_Graphflow::AddEdge(uint v1, uint v2, uint label)
                 local_vec_visited_local[i][v2] = true; 
             }
 
-            // Parallel_FindMatches2(i, 2, m, num_results);
-            Parallel_Graphflow_FindMatches_ParaCOSM_Kernel(i, 2, m, num_results);
+            taskflow_findmatches_layer(i, 2, m, num_results);
 
             for(size_t i = 0; i< local_vec_visited_local.size(); i++){
                 local_vec_visited_local[i][v1] = false;
@@ -2140,6 +2481,115 @@ void Parallel_Graphflow::AddEdge(uint v1, uint v2, uint label)
     num_positive_results_ += num_results;
 }
 
+void Parallel_Graphflow::AddEdgeWithSubflow(uint v1, uint v2, uint label, tf::Subflow& sf)
+{
+    data_.AddEdge(v1, v2, label);
+
+    std::vector<uint> m(query_.NumVertices(), UNMATCHED);
+    std::vector<bool> visited(data_.NumVertices(), false);
+
+    if (max_num_results_ == 0) return;
+
+    size_t num_results = 0ul;
+    for (uint i = 0; i < query_.NumEdges(); i++)
+    {
+        uint u1 = order_vs_[i][0], u2 = order_vs_[i][1];
+        auto temp_q_labels = query_.GetEdgeLabel(u1, u2);
+
+        if (
+            std::get<0>(temp_q_labels) == data_.GetVertexLabel(v1) &&
+            std::get<1>(temp_q_labels) == data_.GetVertexLabel(v2) &&
+            std::get<2>(temp_q_labels) == label
+        ) {
+            m[u1] = v1;
+            m[u2] = v2;
+            visited[v1] = true;
+            visited[v2] = true;
+            taskflow_findmatches_subflow(i, 2, m, visited, num_results, sf);
+            visited[v1] = false;
+            visited[v2] = false;
+            m[u1] = UNMATCHED;
+            m[u2] = UNMATCHED;
+            if (num_results >= max_num_results_) goto END_ADD;
+            if (reach_time_limit) goto END_ADD;
+        }
+        if (
+            std::get<0>(temp_q_labels) == data_.GetVertexLabel(v2) &&
+            std::get<1>(temp_q_labels) == data_.GetVertexLabel(v1) &&
+            std::get<2>(temp_q_labels) == label
+        ) {
+            m[u1] = v2;
+            m[u2] = v1;
+            visited[v2] = true;
+            visited[v1] = true;
+            taskflow_findmatches_subflow(i, 2, m, visited, num_results, sf);
+            visited[v2] = false;
+            visited[v1] = false;
+            m[u1] = UNMATCHED;
+            m[u2] = UNMATCHED;
+            if (num_results >= max_num_results_) goto END_ADD;
+            if (reach_time_limit) goto END_ADD;
+        }
+    }
+    END_ADD:
+    sf.join();  // 等待 Subflow 子任务完成，否则 num_results 仍为 0
+    num_positive_results_ += num_results;
+}
+
+void Parallel_Graphflow::RemoveEdgeWithSubflow(uint v1, uint v2, tf::Subflow& sf)
+{
+    std::vector<uint> m(query_.NumVertices(), UNMATCHED);
+    std::vector<bool> visited(data_.NumVertices(), false);
+    std::tuple labels = data_.GetEdgeLabel(v1, v2);
+
+    size_t num_results = 0ul;
+    if (max_num_results_ == 0) goto END_REMOVE;
+
+    for (uint i = 0; i < query_.NumEdges(); i++)
+    {
+        uint u1 = order_vs_[i][1], u2 = order_csrs_[i][0];
+        auto temp_q_labels = query_.GetEdgeLabel(u1, u2);
+
+        if (
+            std::get<0>(temp_q_labels) == std::get<0>(labels) &&
+            std::get<1>(temp_q_labels) == std::get<1>(labels) &&
+            std::get<2>(temp_q_labels) == std::get<2>(labels)
+        ) {
+            m[u1] = v1;
+            m[u2] = v2;
+            visited[v1] = true;
+            visited[v2] = true;
+            taskflow_findmatches_subflow(i, 2, m, visited, num_results, sf);
+            visited[v1] = false;
+            visited[v2] = false;
+            m[u1] = UNMATCHED;
+            m[u2] = UNMATCHED;
+            if (num_results >= max_num_results_) goto END_REMOVE;
+            if (reach_time_limit) goto END_REMOVE;
+        }
+        if (
+            std::get<1>(temp_q_labels) == std::get<0>(labels) &&
+            std::get<0>(temp_q_labels) == std::get<1>(labels) &&
+            std::get<2>(temp_q_labels) == std::get<2>(labels)
+        ) {
+            m[u1] = v2;
+            m[u2] = v1;
+            visited[v2] = true;
+            visited[v1] = true;
+            taskflow_findmatches_subflow(i, 2, m, visited, num_results, sf);
+            visited[v2] = false;
+            visited[v1] = false;
+            m[u1] = UNMATCHED;
+            m[u2] = UNMATCHED;
+            if (num_results >= max_num_results_) goto END_REMOVE;
+            if (reach_time_limit) goto END_REMOVE;
+        }
+    }
+    END_REMOVE:
+    sf.join();  // 等待 Subflow 子任务完成，否则 num_results 仍为 0
+    num_negative_results_ += num_results;
+    data_.RemoveEdge(v1, v2);
+}
 
 
 /**
@@ -2200,7 +2650,7 @@ void Parallel_Graphflow::RemoveEdge(uint v1, uint v2)
                 local_vec_visited_local[i][v2] = true; 
             }
 
-            Parallel_FindMatches2(i, 2, m, num_results);
+            taskflow_findmatches_layer(i, 2, m, num_results);
 
             for(size_t i = 0; i< local_vec_visited_local.size(); i++){
                 local_vec_visited_local[i][v1] = false;
@@ -2230,7 +2680,7 @@ void Parallel_Graphflow::RemoveEdge(uint v1, uint v2)
                 local_vec_visited_local[i][v2] = true; 
             }
 
-            Parallel_FindMatches2(i, 2, m, num_results);
+            taskflow_findmatches_layer(i, 2, m, num_results);
 
             for(size_t i = 0; i< local_vec_visited_local.size(); i++){
                 local_vec_visited_local[i][v1] = false;
