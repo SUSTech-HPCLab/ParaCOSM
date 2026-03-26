@@ -211,6 +211,24 @@ public:
     );
 
     /**
+     * @brief Persistent OMP pool mode: single parallel region wrapping entire update loop.
+     *
+     * Avoids per-update OMP fork/join by keeping threads alive across the entire
+     * update stream. The master thread runs the sliding-window classification loop,
+     * and inner Parallel_FindMatches2 reuses the existing thread team.
+     */
+    void BatchUpdates_Persistent(
+        size_t& num_v_updates,
+        size_t& num_e_updates,
+        size_t& unsafe_updates,
+        size_t& count,
+        size_t& positive_num_results_last,
+        size_t& negative_num_results_last,
+        std::atomic_bool& reach_time_limit,
+        size_t num_threads = 8
+    );
+
+    /**
      * DegreePruning
      *
      * Check degree-based pruning constraints for mapping query vertices (u1, u2)

@@ -500,6 +500,16 @@ void CSMPP::searchInit(uint v1, uint v2, uint label, searchType type){
         return;
     }
 
+#if defined(SERIAL_NEWSP_ROOT_DISPATCH)
+    for(const auto & item : queryCandidate){
+        run_query_candidate(*this, item, v1, v2);
+        if(reach_time_limit) {
+            return;
+        }
+    }
+    return;
+#endif
+
     const int num_threads = std::min<int>(static_cast<int>(queryCandidate.size()), omp_get_max_threads());
 
     #pragma omp parallel for schedule(dynamic, 1) num_threads(num_threads)

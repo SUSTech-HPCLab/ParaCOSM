@@ -115,7 +115,8 @@
 // Unified wrapper: dispatch by update_mode string and call the corresponding InterExecutor method
 inline void RunUpdates_InterExecutor(Graph& data_graph, matching* mm, size_t& num_v_updates, size_t& num_e_updates,
     size_t& unsafe_updates, size_t& count, size_t& positive_num_results_last,
-    size_t& negative_num_results_last, std::atomic_bool& reach_time_limit, const std::string& update_mode) {
+    size_t& negative_num_results_last, std::atomic_bool& reach_time_limit, const std::string& update_mode,
+    size_t num_threads = 8) {
 
     InterExecutor executor(data_graph, mm);
 
@@ -147,6 +148,10 @@ inline void RunUpdates_InterExecutor(Graph& data_graph, matching* mm, size_t& nu
         executor.SingleThreadUpdate(
             num_v_updates, num_e_updates, unsafe_updates, count,
             positive_num_results_last, negative_num_results_last, reach_time_limit);
+    } else if (update_mode == "persistent") {
+        executor.BatchUpdates_Persistent(
+            num_v_updates, num_e_updates, unsafe_updates, count,
+            positive_num_results_last, negative_num_results_last, reach_time_limit, num_threads);
     } else {
         // default fallback
         executor.BatchUpdates3(
@@ -186,7 +191,7 @@ int main(int argc, char *argv[])
     app.add_option("--orders", orders, "pre-defined matching orders");
     app.add_option("-t,--thread-num", thread_num, "Number of thread that program will use.");
     app.add_option("--auto-tuning", auto_tuning, "Framework will tune the thread number with query vertex");
-    app.add_option("-m,--update-mode", update_mode, "Update strategy: batch | batch2 | batch3 | batch4 | openmp | queue | single");
+    app.add_option("-m,--update-mode", update_mode, "Update strategy: batch | batch2 | batch3 | batch4 | openmp | queue | single | persistent");
 
     
     CLI11_PARSE(app, argc, argv);
@@ -309,7 +314,8 @@ int main(int argc, char *argv[])
 
         RunUpdates_InterExecutor(
             data_graph, mm, num_v_updates, num_e_updates, unsafe_updates, count,
-            positive_num_results_last, negative_num_results_last, reach_time_limit, update_mode);
+            positive_num_results_last, negative_num_results_last, reach_time_limit, update_mode,
+            thread_num);
 
         // while (!data_graph.updates_.empty() && !reach_time_limit) {
             // ProcessBatchUpdates(data_graph, mm, num_v_updates, num_e_updates, unsafe_updates, count, 
