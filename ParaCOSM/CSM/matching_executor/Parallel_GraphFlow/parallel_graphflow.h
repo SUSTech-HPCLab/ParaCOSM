@@ -1,7 +1,10 @@
 #ifndef MATCHING_PARALLEL_GRAPHFLOW
 #define MATCHING_PARALLEL_GRAPHFLOW
 
+#include <atomic>
+#include <functional>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 #include <taskflow/taskflow.hpp>
@@ -15,8 +18,6 @@
 class Parallel_Graphflow : public matching
 {
 private:
-    // a list of matching orders starting from each query edge
-    // the first matching order also applies to the initial matching
     std::vector<std::vector<uint>> order_vs_;
     std::vector<std::vector<uint>> order_csrs_;
     std::vector<std::vector<uint>> order_offs_;
@@ -24,26 +25,39 @@ private:
     std::vector<std::vector<uint>> local_vec_m;
     std::vector<std::vector<bool>> local_vec_visited_local;
 
-    // std::vector< std::tuple<uint, uint, size_t, std::vector<uint>,
-    // uint , uint> > vertex_vector;
     std::vector< std::tuple<
     uint,                // v 
-    // uint,                // u 
     uint,                // u_min
     uint,               // u_min_label 
-    // uint,                // order_index 
-    // uint,                // depth 
     std::vector<uint>,   // m 
-    // size_t&,             // num_results
     uint                 // i 
     > > vertex_vector;
 
     tbb::concurrent_queue< std::tuple<uint, uint, uint,  std::vector<uint>,  uint > > job_queue;
 
+    struct StealWork {
+        std::vector<uint> m;
+        std::vector<uint> ancestors;
+        uint start_depth;
+        uint order_index;
+    };
+    tbb::concurrent_queue<StealWork> steal_queue_;
+
     mutable std::mutex enum_result_mutex_;
 
-    // Persistent executor to avoid per-call thread pool creation overhead
     std::unique_ptr<tf::Executor> persistent_executor_;
+
+    // ---- Persistent thread pool (avoids OMP fork/join per update) ----
+    std::vector<std::thread> pool_workers_;
+    std::atomic<bool> pool_shutdown_{false};
+    std::atomic<uint64_t> pool_epoch_{0};
+    std::atomic<size_t> pool_next_item_{0};
+    std::atomic<size_t> pool_items_done_{0};
+    size_t pool_total_items_{0};
+    std::function<void(size_t, size_t)> pool_work_fn_;
+
+    void pool_worker_loop_(size_t tid);
+    void pool_dispatch_(size_t count, std::function<void(size_t, size_t)> fn);
 
     size_t NUMTHREAD;
     size_t auto_tuning;
@@ -52,7 +66,11 @@ private:
 public:
     Parallel_Graphflow(Graph& query_graph, Graph& data_graph, uint max_num_results,
             bool print_prep, bool print_enum, bool homo,  size_t NUMTHREAD, size_t auto_tuning);
-    ~Parallel_Graphflow() override {};
+    ~Parallel_Graphflow() override {
+        pool_shutdown_.store(true, std::memory_order_release);
+        pool_epoch_.fetch_add(1, std::memory_order_release);
+        for (auto& w : pool_workers_) w.join();
+    };
 
     void Preprocessing() override;
     void InitialMatching() override;
@@ -159,6 +177,11 @@ private:
     void FindMatches_local_m(uint order_index, uint depth, std::vector<uint> m, size_t &num_results);
 
     void FindMatches_local(uint order_index, uint depth, std::vector<uint> m, size_t &num_results, size_t thread_id);
+
+    // Work-splitting version: splits large subtrees into steal_queue_
+    void FindMatches_local_splitting(uint order_index, uint depth,
+        std::vector<uint>& m, std::vector<uint>& ancestors,
+        size_t &num_results, size_t thread_id);
 
     void Parallel_FindMatches2(uint order_index, uint depth, std::vector<uint> m, size_t &num_results);
 
