@@ -446,154 +446,96 @@ void CSMPP::searchInit(uint v1, uint v2, uint label, searchType type){
             }
         }
     }
-    uint64_t temp = 0;
-    // //3. begin seach
-    // std::cout << queryCandidate.size() << std::endl;
-    // for(auto & item : queryCandidate){
-    //     auto  _edge = this->queryVec[item.first].GetEdge(item.second);
-    //     uint _edgeV1label = _edge.GetV1Label();
-    //     uint _edgeV2label = _edge.GetV2Label();
-    //     const auto & matchOrder = this->queryVec[item.first].GetMatchOrder(item.second);
-    //     if(_edgeV1label != _edgeV2label){
-    //         if(this->data_.GetVertexLabel(v1) != this->queryVec[item.first].GetVertexLabel(matchOrder[0])){
-    //             std::swap(v1, v2);
-    //         }
-    //         this->match.resize(this->queryVec[item.first].NumVertices(), UNMATCHED);
-    //         this->matchCandidate.resize(this->queryVec[item.first].NumVertices());
-    //         this->matchVertex(v1, 0);
-    //         this->matchVertex(v2, 1); 
-    //         this->queryVec[item.first].isolatedVertexTimes.clear();
-    //         this->searchVertex(item.first, item.second, type, 2);
+    auto run_query_candidate = [&](CSMPP & engine, const std::pair<uint, uint> & item, uint seed_v1, uint seed_v2) {
+        auto _edge = engine.queryVec[item.first].GetEdge(item.second);
+        uint edge_v1_label = _edge.GetV1Label();
+        uint edge_v2_label = _edge.GetV2Label();
+        const auto & matchOrder = engine.queryVec[item.first].GetMatchOrder(item.second);
 
-    //         this->popVertex(v2, 1);
-    //         this->popVertex(v1, 0);
-    //     }
-    //     else{
-    //         for(int i = 0; i < 2; i++){
-    //             //index check
-    //             if(this->indexCheck(v1, matchOrder[0], item.first)){
-    //                 this->match.resize(this->queryVec[item.first].NumVertices(), UNMATCHED);
-    //                 this->matchCandidate.resize(this->queryVec[item.first].NumVertices());
-    //                 this->matchVertex(v1, 0);
-    //                 this->matchVertex(v2, 1);
-    //                 this->queryVec[item.first].isolatedVertexTimes.clear();
-    //                 this->searchVertex(item.first, item.second, type, 2);
-    //                 this->popVertex(v2, 1);
-    //                 this->popVertex(v1, 0);
-    //             }
-    //             std::swap(v1,v2);// round 2 need
-    //         }
-    //     }
-    //     if(reach_time_limit) return;
-    // }
+        uint local_v1 = seed_v1;
+        uint local_v2 = seed_v2;
 
-    auto num = queryCandidate.size();
-    auto thread_num = 8;
-    if(num < thread_num){
-        thread_num = num;
-    }
+        if(edge_v1_label != edge_v2_label){
+            if(engine.data_.GetVertexLabel(local_v1) != engine.queryVec[item.first].GetVertexLabel(matchOrder[0])){
+                std::swap(local_v1, local_v2);
+            }
+            engine.match.resize(engine.queryVec[item.first].NumVertices(), UNMATCHED);
+            engine.matchCandidate.resize(engine.queryVec[item.first].NumVertices());
+            engine.matchVertex(local_v1, 0);
+            engine.matchVertex(local_v2, 1);
+            engine.queryVec[item.first].isolatedVertexTimes.clear();
+            engine.searchVertex(item.first, item.second, type, 2);
 
-        // 3. 开始搜索 - 并行处理查询候选项
-        // #pragma omp parallel num_threads(8)
-        {
-            // 线程本地数据
-            std::vector<int> local_match;
-            std::vector<std::vector<uint>> local_matchCandidate;
-            
-            // #pragma omp for
-            for(size_t i = 0; i < queryCandidate.size(); i++) {
-                auto& item = queryCandidate[i];
-                auto _edge = this->queryVec[item.first].GetEdge(item.second);
-                uint _edgeV1label = _edge.GetV1Label();
-                uint _edgeV2label = _edge.GetV2Label();
-                const auto & matchOrder = this->queryVec[item.first].GetMatchOrder(item.second);
-                
-                // 每个线程使用本地副本
-                uint local_v1 = v1;
-                uint local_v2 = v2;
-                
-                // #pragma omp critical
-                {
-                    if(_edgeV1label != _edgeV2label) {
-                        // change order
-                        if(this->data_.GetVertexLabel(local_v1) != this->queryVec[item.first].GetVertexLabel(matchOrder[0])) {
-                            std::swap(local_v1, local_v2);
-                        }
-                        
-                        this->match.resize(this->queryVec[item.first].NumVertices(), UNMATCHED);
-
-                        for(int i =0; i < Thread_MAX; i++){
-                            this->match_parallel[i].resize(this->queryVec[item.first].NumVertices(), UNMATCHED);
-                            // data_.NumVertices(), false
-                            this->visited_parallel[i].resize(this->data_.NumVertices(), false);
-                        }
-                        this->matchCandidate.resize(this->queryVec[item.first].NumVertices());
-                        for (int i = 0; i < Thread_MAX; i++)
-                        {
-                            this->matchCandidate_parallel[i].resize(this->queryVec[item.first].NumVertices());
-                        }
-                        
-
-                        this->matchVertex(local_v1, 0);
-                        this->matchVertex(local_v2, 1);
-                        matchVertexAll(local_v1, 0);
-                        matchVertexAll(local_v2, 1);
-                        
-
-
-                        this->queryVec[item.first].isolatedVertexTimes.clear();
-                        this->Parallel_searchVertex(item.first, item.second, type, 2);
-                        // this->searchVertex(item.first, item.second, type, 2);
-// 
-
-
-                        this->popVertex(local_v2, 1); // change!
-                        this->popVertex(local_v1, 0);
-                        popVertexAll(local_v2, 1);
-                        popVertexAll(local_v1, 0);
-                    }
-                    else {
-                        for(int j = 0; j < 2; j++) {
-                            if(this->indexCheck(local_v1, matchOrder[0], item.first)) {
-                                this->match.resize(this->queryVec[item.first].NumVertices(), UNMATCHED);
-                                this->matchCandidate.resize(this->queryVec[item.first].NumVertices());
-                                for(int i =0; i < Thread_MAX; i++){
-                                    this->match_parallel[i].resize(this->queryVec[item.first].NumVertices(), UNMATCHED);
-                                    // data_.NumVertices(), false
-                                    this->visited_parallel[i].resize(this->data_.NumVertices(), false);
-                                }
-
-                                for (int i = 0; i < Thread_MAX; i++)
-                                {
-                                    this->matchCandidate_parallel[i].resize(this->queryVec[item.first].NumVertices());
-                                }
-
-
-                                this->matchVertex(local_v1, 0);
-                                this->matchVertex(local_v2, 1);
-                                matchVertexAll(local_v1, 0);
-                                matchVertexAll(local_v2, 1);
-                                this->queryVec[item.first].isolatedVertexTimes.clear();
-
-                                // this->Parallel_searchVertex(item.first, item.second, type, 2);
-                                this->searchVertex(item.first, item.second, type, 2);
-
-                                this->popVertex(local_v2, 1);
-                                this->popVertex(local_v1, 0);
-                                popVertexAll(local_v2, 1);
-                                popVertexAll(local_v1, 0);
-                            }
-                            std::swap(local_v1, local_v2);
-                        }
-                    }
+            engine.popVertex(local_v2, 1);
+            engine.popVertex(local_v1, 0);
+        }
+        else{
+            for(int round = 0; round < 2; round++){
+                if(engine.indexCheck(local_v1, matchOrder[0], item.first)){
+                    engine.match.resize(engine.queryVec[item.first].NumVertices(), UNMATCHED);
+                    engine.matchCandidate.resize(engine.queryVec[item.first].NumVertices());
+                    engine.matchVertex(local_v1, 0);
+                    engine.matchVertex(local_v2, 1);
+                    engine.queryVec[item.first].isolatedVertexTimes.clear();
+                    engine.searchVertex(item.first, item.second, type, 2);
+                    engine.popVertex(local_v2, 1);
+                    engine.popVertex(local_v1, 0);
                 }
+                std::swap(local_v1, local_v2);
             }
         }
+    };
 
+    if(queryCandidate.empty()){
+        return;
+    }
 
+    if(print_enumeration_results_ || queryCandidate.size() == 1){
+        for(const auto & item : queryCandidate){
+            run_query_candidate(*this, item, v1, v2);
+            if(reach_time_limit) {
+                return;
+            }
+        }
+        return;
+    }
 
+    const int num_threads = std::min<int>(static_cast<int>(queryCandidate.size()), omp_get_max_threads());
 
+    #pragma omp parallel for schedule(dynamic, 1) num_threads(num_threads)
+    for(int index = 0; index < static_cast<int>(queryCandidate.size()); index++){
+        if(reach_time_limit){
+            continue;
+        }
 
+        CSMPP worker(
+            this->data_,
+            this->query_,
+            this->queryVec,
+            static_cast<uint>(this->max_num_results_),
+            this->print_preprocessing_results_,
+            this->print_enumeration_results_,
+            this->homomorphism_,
+            this->print_init
+        );
+        worker.updateEdgeFindQuery = this->updateEdgeFindQuery;
+        worker.initEdgeFindQuery = this->initEdgeFindQuery;
+
+        run_query_candidate(worker, queryCandidate[index], v1, v2);
+
+        #pragma omp critical
+        {
+            this->num_initial_results_ += worker.num_initial_results_;
+            this->num_positive_results_ += worker.num_positive_results_;
+            this->num_negative_results_ += worker.num_negative_results_;
+            this->num_intermediate_results_before_index_check_ += worker.num_intermediate_results_before_index_check_;
+            this->num_intermediate_results_after_index_check_ += worker.num_intermediate_results_after_index_check_;
+            this->num_intermediate_results_after_joinability_check_ += worker.num_intermediate_results_after_joinability_check_;
+            this->num_intermediate_results_after_visit_check_ += worker.num_intermediate_results_after_visit_check_;
+            this->num_intermediate_results_with_empty_candidate_set_ += worker.num_intermediate_results_with_empty_candidate_set_;
+            this->num_intermediate_results_without_results_ += worker.num_intermediate_results_without_results_;
+        }
+    }
 }
 
 
@@ -1012,137 +954,363 @@ void CSMPP::searchVertex_local(uint queryIndex, uint edgeIndex, searchType type,
  * @return {*}
  */
 void CSMPP::searchVertex(uint queryIndex, uint edgeIndex, searchType type, uint depth){
+    auto & queryGraph = this->queryVec[queryIndex];
+    const uint cacheStatu = queryGraph.getCacheStatu(edgeIndex, depth);
+    const auto & matchOrder = queryGraph.GetMatchOrder(edgeIndex);
+    const uint queryVexter = matchOrder[depth];
+    vertexType currentSearchVertexType = queryGraph.getVertexType(edgeIndex, depth);
+    const auto & desItem = queryGraph.GetDescList(edgeIndex, depth);
+    const auto & freezeIndex = queryGraph.getUnfreezeList(edgeIndex, depth);
+    useCacheStatus finish = notUse;
 
-    auto & QUERY_GRAPH = this->queryVec[queryIndex]; // take one query graph
-    const uint cacheStatu = QUERY_GRAPH.getCacheStatu(edgeIndex, depth);
-    const auto & MATCHORDER = QUERY_GRAPH.GetMatchOrder(edgeIndex);
-    const uint queryVexter = MATCHORDER[depth];
-    vertexType currentSearchVertexType = QUERY_GRAPH.getVertexType(edgeIndex, depth);
-    const auto & desItem = QUERY_GRAPH.GetDescList(edgeIndex, depth);//<v1Index,v1Label,eLabel>
-    const auto & freezeIndex = QUERY_GRAPH.getUnfreezeList(edgeIndex, depth);
-
-    //  ///////////////////////////////////////////////////////////////
-    
-    uint vertexLabel = QUERY_GRAPH.GetVertexLabel(queryVexter);
-
-    //1.intersection worst case
-    //1.1 find min
-    std::vector<uint> candidate;
-    LRAndIndexCheckType decision = QUERY_GRAPH.getDecision(edgeIndex, depth); // adaptive label distribute check
-
-    uint min_u_index = INT_MAX;
-    uint min_u_neighborSize = INT_MAX;
-
-    //  ///////////////////////////////////////////////////////////////
-
-    for(int i = 0; i < desItem.size(); i++){
-        const auto & item = desItem[i];
-
-        uint v = this->match[std::get<0>(item)]; // gaigaigai
-
-        uint Size = this->data_.getIndexValue(v, vertexLabel);
-        if(Size < min_u_neighborSize){
-            min_u_index = i;
-            min_u_neighborSize = Size;
-        }
-        else if(Size == min_u_neighborSize){
-            uint preID = this->match[std::get<0>(desItem[min_u_index])]; // gaigaigai
-
-            if(this->data_.GetNeighbors(preID).size() > this->data_.GetNeighbors(v).size()){
-                min_u_index = i;
-                min_u_neighborSize = Size;
-            }
-        }
-    }
-
-    //  ///////////////////////////////////////////////////////////////
-
-    uint min_u = this->match[std::get<0>(desItem[min_u_index])];
-
-    uint min_u_elabel = std::get<2>(desItem[min_u_index]);//elabel
-
-    const auto& MinNeighbor = data_.GetNeighbors(min_u);
-    const auto& q_nbr_labels = data_.GetNeighborLabels(min_u);
-    
-    for(int i = 0; i < MinNeighbor.size(); i++){
-        const uint v = MinNeighbor[i];
-        //1. check label
-        if( this->data_.GetVertexLabel(v) != vertexLabel || q_nbr_labels[i] != min_u_elabel)continue;
-
-        //2. check visit
-        if(this->visited_[v] == true && !homomorphism_ ) continue;
-
-        //3.check if joinable
-        bool joinable = true;
-        for(int k = 0; k < desItem.size(); k++){
-            if(k == min_u_index) continue;
-
-            const uint data_V = this->match[std::get<0>(desItem[k])];
-
-            const uint elabel = std::get<2>(desItem[k]);
-            const auto & dataVNeighbor = this->data_.GetNeighbors(data_V);
-            auto it = std::lower_bound(dataVNeighbor.begin(), dataVNeighbor.end(), v);
-            if(it == dataVNeighbor.end() || *it != v){
-                joinable = false;
-                break;
-            }
-            else
+    if(depth != cacheStatu)
+    {
+        if(desItem.size() == 0 && freezeIndex.size() == 0)
+        {
+            finish = useAndFinsh;
+            if(currentSearchVertexType == freeVertex)
             {
-                uint dis = std::distance(dataVNeighbor.begin(), it);
-                if(this->data_.GetNeighborLabels(data_V)[dis] != elabel){
-                    joinable = false;
-                    break;
+                for(auto & data_v : this->matchCandidate[cacheStatu])
+                {
+                    if(this->visited_[data_v]) {
+                        continue;
+                    }
+                    this->matchVertex(data_v, depth);
+                    this->searchVertex(queryIndex, edgeIndex, type, depth + 1);
+                    this->popVertex(data_v, depth);
+                }
+            }
+            else{
+                if(currentSearchVertexType == isolatedVertex){
+                    this->queryVec[queryIndex].isolatedVertexTimesAdd(this->matchCandidate[cacheStatu]);
+                }
+                if(depth == queryGraph.NumVertices() - 1)
+                {
+                    this->addMatchResult(queryIndex, edgeIndex, type);
+                }
+                else
+                {
+                    this->searchVertex(queryIndex, edgeIndex, type, depth + 1);
+                }
+                if(currentSearchVertexType == isolatedVertex){
+                    this->queryVec[queryIndex].isolatedVertexTimesMinus(this->matchCandidate[cacheStatu]);
                 }
             }
         }
-        if(!joinable){
-            continue;
+        else
+        {
+            finish = useNotFinsh;
         }
-        if(decision == Part1Check && !this->indexCheck(v, queryVexter, queryIndex)){
-            continue;
-        }
-        
-        candidate.emplace_back(v);
     }
-        
-    if(candidate.size() == 0){
-        return;
-    }
-     
-    //  ///////////////////////////////////////////////////////////////
 
- 
-    if(currentSearchVertexType == freeVertex){
-            // if(candidate.size() > 32){
-            //     std::cout << candidate.size()  << std::endl;    
-            // }
-            // std::cout << "currentSearchVertexType: " << currentSearchVertexType << std::endl;
-        for(auto & dataV : candidate){
-            this->matchVertex(dataV, depth);
-            // this
-            this->searchVertex(queryIndex, edgeIndex, type, depth + 1);
-            // this.search
-            this->popVertex(dataV, depth);
+    uint vertexLabel = queryGraph.GetVertexLabel(queryVexter);
+
+    if(finish != useAndFinsh)
+    {
+        std::vector<uint> candidate;
+        LRAndIndexCheckType decision = queryGraph.getDecision(edgeIndex, depth);
+        if(desItem.size() != 0){
+            uint min_u_index = INT_MAX;
+            uint min_u_neighborSize = INT_MAX;
+            for(int i = 0; i < static_cast<int>(desItem.size()); i++){
+                const auto & item = desItem[i];
+                uint matched_v = this->match[std::get<0>(item)];
+                uint size = this->data_.getIndexValue(matched_v, vertexLabel);
+                if(size < min_u_neighborSize){
+                    min_u_index = i;
+                    min_u_neighborSize = size;
+                }
+                else if(size == min_u_neighborSize){
+                    uint prev_id = this->match[std::get<0>(desItem[min_u_index])];
+                    if(this->data_.GetNeighbors(prev_id).size() > this->data_.GetNeighbors(matched_v).size()){
+                        min_u_index = i;
+                        min_u_neighborSize = size;
+                    }
+                }
+            }
+
+            if(finish == useNotFinsh)
+            {
+                if(min_u_neighborSize < this->matchCandidate[cacheStatu].size())
+                {
+                    uint min_u = this->match[std::get<0>(desItem[min_u_index])];
+                    uint min_u_elabel = std::get<2>(desItem[min_u_index]);
+                    const auto & min_neighbor = this->data_.GetNeighbors(min_u);
+                    const auto & min_neighbor_labels = this->data_.GetNeighborLabels(min_u);
+                    for(int i = 0; i < static_cast<int>(min_neighbor.size()); i++){
+                        const uint candidate_v = min_neighbor[i];
+                        if(this->data_.GetVertexLabel(candidate_v) != vertexLabel || min_neighbor_labels[i] != min_u_elabel){
+                            continue;
+                        }
+                        if(this->visited_[candidate_v] && !homomorphism_) {
+                            continue;
+                        }
+                        bool joinable = true;
+                        for(int k = 0; k < static_cast<int>(desItem.size()); k++){
+                            if(k == static_cast<int>(min_u_index)) {
+                                continue;
+                            }
+                            const uint data_v = this->match[std::get<0>(desItem[k])];
+                            const uint elabel = std::get<2>(desItem[k]);
+                            const auto & data_neighbors = this->data_.GetNeighbors(data_v);
+                            auto it = std::lower_bound(data_neighbors.begin(), data_neighbors.end(), candidate_v);
+                            if(it == data_neighbors.end() || *it != candidate_v){
+                                joinable = false;
+                                break;
+                            }
+                            uint dis = std::distance(data_neighbors.begin(), it);
+                            if(this->data_.GetNeighborLabels(data_v)[dis] != elabel){
+                                joinable = false;
+                                break;
+                            }
+                        }
+                        auto cache_it = std::lower_bound(this->matchCandidate[cacheStatu].begin(), this->matchCandidate[cacheStatu].end(), candidate_v);
+                        if(cache_it == this->matchCandidate[cacheStatu].end() || *cache_it != candidate_v){
+                            joinable = false;
+                        }
+                        if(!joinable) {
+                            continue;
+                        }
+                        if(decision == Part1Check && !this->indexCheck(candidate_v, queryVexter, queryIndex)) {
+                            continue;
+                        }
+                        candidate.emplace_back(candidate_v);
+                    }
+                }
+                else
+                {
+                    for(int i = 0; i < static_cast<int>(this->matchCandidate[cacheStatu].size()); i++){
+                        const uint candidate_v = this->matchCandidate[cacheStatu][i];
+                        if(this->visited_[candidate_v] && !homomorphism_) {
+                            continue;
+                        }
+                        bool joinable = true;
+                        for(int k = 0; k < static_cast<int>(desItem.size()); k++){
+                            const uint data_v = this->match[std::get<0>(desItem[k])];
+                            const uint elabel = std::get<2>(desItem[k]);
+                            const auto & data_neighbors = this->data_.GetNeighbors(data_v);
+                            auto it = std::lower_bound(data_neighbors.begin(), data_neighbors.end(), candidate_v);
+                            if(it == data_neighbors.end() || *it != candidate_v){
+                                joinable = false;
+                                break;
+                            }
+                            uint dis = std::distance(data_neighbors.begin(), it);
+                            if(this->data_.GetNeighborLabels(data_v)[dis] != elabel){
+                                joinable = false;
+                                break;
+                            }
+                        }
+                        if(!joinable) {
+                            continue;
+                        }
+                        if(decision == Part1Check && !this->indexCheck(candidate_v, queryVexter, queryIndex)) {
+                            continue;
+                        }
+                        candidate.emplace_back(candidate_v);
+                    }
+                }
+                finish = useAndFinsh;
+            }
+            else
+            {
+                uint min_u = this->match[std::get<0>(desItem[min_u_index])];
+                uint min_u_elabel = std::get<2>(desItem[min_u_index]);
+                const auto & min_neighbor = this->data_.GetNeighbors(min_u);
+                const auto & min_neighbor_labels = this->data_.GetNeighborLabels(min_u);
+                for(int i = 0; i < static_cast<int>(min_neighbor.size()); i++){
+                    const uint candidate_v = min_neighbor[i];
+                    if(this->data_.GetVertexLabel(candidate_v) != vertexLabel || min_neighbor_labels[i] != min_u_elabel){
+                        continue;
+                    }
+                    if(this->visited_[candidate_v] && !homomorphism_) {
+                        continue;
+                    }
+                    bool joinable = true;
+                    for(int k = 0; k < static_cast<int>(desItem.size()); k++){
+                        if(k == static_cast<int>(min_u_index)) {
+                            continue;
+                        }
+                        const uint data_v = this->match[std::get<0>(desItem[k])];
+                        const uint elabel = std::get<2>(desItem[k]);
+                        const auto & data_neighbors = this->data_.GetNeighbors(data_v);
+                        auto it = std::lower_bound(data_neighbors.begin(), data_neighbors.end(), candidate_v);
+                        if(it == data_neighbors.end() || *it != candidate_v){
+                            joinable = false;
+                            break;
+                        }
+                        uint dis = std::distance(data_neighbors.begin(), it);
+                        if(this->data_.GetNeighborLabels(data_v)[dis] != elabel){
+                            joinable = false;
+                            break;
+                        }
+                    }
+                    if(!joinable) {
+                        continue;
+                    }
+                    if(decision == Part1Check && !this->indexCheck(candidate_v, queryVexter, queryIndex)) {
+                        continue;
+                    }
+                    candidate.emplace_back(candidate_v);
+                }
+            }
+            if(candidate.empty()) {
+                return;
+            }
         }
-    }
-    else{
-        // std::cout << "currentSearchVertexType: " << currentSearchVertexType << std::endl;
-        this->matchVertex(candidate, depth);
-        if(currentSearchVertexType == isolatedVertex){
-            this->queryVec[queryIndex].isolatedVertexTimesAdd(this->matchCandidate[depth]);
-        }
-        if(depth == this->queryVec[queryIndex].NumVertices() - 1){
-            this->addMatchResult(queryIndex, edgeIndex, type);
+
+        if(!freezeIndex.empty()){
+            this->headRecord[depth].clear();
+            this->intersectionResult[depth].clear();
+            this->combineStack[depth].clear();
+            std::vector<uint> elabels;
+            std::vector<std::vector<uint>> needToCombine(freezeIndex.size());
+            for(int i = 0; i < static_cast<int>(freezeIndex.size()); i++){
+                needToCombine[i].reserve(this->matchCandidate[freezeIndex[i].first].size());
+                if(this->queryVec[queryIndex].getDestListSize(edgeIndex, freezeIndex[i].first) == 0){
+                    for(auto item : this->matchCandidate[queryGraph.getCacheStatu(edgeIndex, freezeIndex[i].first)])
+                    {
+                        if(this->indexCheck(item, matchOrder[freezeIndex[i].first], queryIndex))
+                        {
+                            needToCombine[i].emplace_back(item);
+                        }
+                    }
+                    if(needToCombine[i].empty()){
+                        return;
+                    }
+                }
+                else
+                {
+                    needToCombine[i] = this->matchCandidate[freezeIndex[i].first];
+                }
+                this->headRecord[depth].emplace_back(needToCombine[i].size());
+                elabels.emplace_back(freezeIndex[i].second);
+            }
+            this->stackSize[depth] = needToCombine.size();
+            this->stackHead[depth] = 0;
+            this->combineStack[depth].resize(this->stackSize[depth]);
+            this->intersectionResult[depth].resize(this->stackSize[depth]);
+            this->type[depth] = runningStack;
+            while(this->headRecord[depth][0] >= 0){
+                while(this->stackHead[depth] < this->stackSize[depth]){
+                    if(this->headRecord[depth][this->stackHead[depth]] == 0){
+                        bool pending = this->headChange(needToCombine, depth);
+                        if(!pending){
+                            return;
+                        }
+                    }
+                    int replaceIndex = this->stackHead[depth];
+                    uint currentVertex = needToCombine[replaceIndex][this->headRecord[depth][replaceIndex] - 1];
+                    if(finish != useNotFinsh)
+                    {
+                        if(!vertexPushCheck(currentVertex, vertexLabel, candidate, depth, queryIndex, queryVexter, elabels[replaceIndex])){
+                            this->headRecord[depth][replaceIndex]--;
+                        }
+                        else{
+                            this->combinePushBack(currentVertex, replaceIndex, depth);
+                        }
+                    }
+                    else
+                    {
+                        if(!vertexPushCheck(currentVertex, vertexLabel, this->matchCandidate[cacheStatu], depth, queryIndex, queryVexter, elabels[replaceIndex])){
+                            this->headRecord[depth][replaceIndex]--;
+                        }
+                        else{
+                            this->combinePushBack(currentVertex, replaceIndex, depth);
+                        }
+                    }
+                }
+                this->queryVec[queryIndex].setVertexStatus(edgeIndex, freezeIndex, freeVertex);
+                this->setMatchVertex(freezeIndex, this->combineStack[depth]);
+                if(decision == Part2Check)
+                {
+                    std::vector<uint> part2Candidate;
+                    for(auto & data_v : this->getItersectionTop(depth)){
+                        if(this->indexCheck(data_v, queryVexter, queryIndex)){
+                            part2Candidate.emplace_back(data_v);
+                        }
+                    }
+                    if(!part2Candidate.empty()){
+                        if(currentSearchVertexType == freeVertex){
+                            for(auto & data_v : part2Candidate){
+                                this->matchVertex(data_v, depth);
+                                this->searchVertex(queryIndex, edgeIndex, type, depth + 1);
+                                this->popVertex(data_v, depth);
+                            }
+                        }
+                        else{
+                            this->matchVertex(part2Candidate, depth);
+                            if(currentSearchVertexType == isolatedVertex){
+                                this->queryVec[queryIndex].isolatedVertexTimesAdd(this->matchCandidate[depth]);
+                            }
+                            if(depth == this->queryVec[queryIndex].NumVertices() - 1){
+                                this->addMatchResult(queryIndex, edgeIndex, type);
+                            }
+                            else{
+                                this->searchVertex(queryIndex, edgeIndex, type, depth + 1);
+                            }
+                            if(currentSearchVertexType == isolatedVertex){
+                                this->queryVec[queryIndex].isolatedVertexTimesMinus(this->matchCandidate[depth]);
+                            }
+                            this->popVertex(depth);
+                        }
+                    }
+                }
+                else{
+                    if(currentSearchVertexType == freeVertex){
+                        for(auto & data_v : this->getItersectionTop(depth)){
+                            this->matchVertex(data_v, depth);
+                            this->searchVertex(queryIndex, edgeIndex, type, depth + 1);
+                            this->popVertex(data_v, depth);
+                        }
+                    }
+                    else{
+                        this->matchVertex(this->getItersectionTop(depth), depth);
+                        if(currentSearchVertexType == isolatedVertex){
+                            this->queryVec[queryIndex].isolatedVertexTimesAdd(this->matchCandidate[depth]);
+                        }
+                        if(depth == this->queryVec[queryIndex].NumVertices() - 1){
+                            this->addMatchResult(queryIndex, edgeIndex, type);
+                        }
+                        else{
+                            this->searchVertex(queryIndex, edgeIndex, type, depth + 1);
+                        }
+                        if(currentSearchVertexType == isolatedVertex){
+                            this->queryVec[queryIndex].isolatedVertexTimesMinus(this->matchCandidate[depth]);
+                        }
+                        this->popVertex(depth);
+                    }
+                }
+                this->unsetMatchVertex(freezeIndex);
+                this->queryVec[queryIndex].setVertexStatus(edgeIndex, freezeIndex, freezeVertex);
+                this->combineStackPopTail(depth);
+            }
         }
         else{
-            this->searchVertex(queryIndex, edgeIndex, type, depth + 1);
+            if(currentSearchVertexType == freeVertex){
+                for(auto & data_v : candidate){
+                    this->matchVertex(data_v, depth);
+                    this->searchVertex(queryIndex, edgeIndex, type, depth + 1);
+                    this->popVertex(data_v, depth);
+                }
+            }
+            else{
+                this->matchVertex(candidate, depth);
+                if(currentSearchVertexType == isolatedVertex){
+                    this->queryVec[queryIndex].isolatedVertexTimesAdd(this->matchCandidate[depth]);
+                }
+                if(depth == this->queryVec[queryIndex].NumVertices() - 1){
+                    this->addMatchResult(queryIndex, edgeIndex, type);
+                }
+                else{
+                    this->searchVertex(queryIndex, edgeIndex, type, depth + 1);
+                }
+                if(currentSearchVertexType == isolatedVertex){
+                    this->queryVec[queryIndex].isolatedVertexTimesMinus(this->matchCandidate[depth]);
+                }
+                this->popVertex(depth);
+            }
         }
-        if(currentSearchVertexType == isolatedVertex){
-            this->queryVec[queryIndex].isolatedVertexTimesMinus(this->matchCandidate[depth]);
-        }
-        this->popVertex(depth);
     }
-
 }
 
 
@@ -1193,9 +1361,9 @@ void CSMPP::Parallel_searchVertex(uint queryIndex, uint edgeIndex, searchType ty
         }
     }
 
-
-
-
+    if(desItem.size() == 0){
+        return;
+    }
 
     uint min_u = this->match[std::get<0>(desItem[min_u_index])];
 
@@ -1281,7 +1449,7 @@ void CSMPP::Parallel_searchVertex(uint queryIndex, uint edgeIndex, searchType ty
             NUMT = Thread_MAX;
         }
 
-        #pragma omp parallel for num_threads(NUMT) shcedule(dynamic, 1)
+        #pragma omp parallel for num_threads(NUMT) schedule(dynamic, 1)
         for(int i =0; i < candidate.size(); i++){
             size_t thread_id = omp_get_thread_num();
             matchVertexlocal(candidate[i], depth, match_parallel[thread_id], visited_parallel[thread_id]);
@@ -1480,28 +1648,32 @@ void CSMPP::Parallel_searchVertex_local(uint queryIndex, uint edgeIndex, searchT
         // this->matchVertex(candidate, depth);
         this->matchVertexlocal(candidate, depth, match_parallel[thread_id], matchCandidate_parallel[thread_id], thread_id);
         
+        #pragma omp critical
+        {
+        // Copy thread-local state to shared state for addMatchResult compatibility
+        this->matchCandidate[depth] = matchCandidate_parallel[thread_id][depth];
+        for(uint qi = 0; qi < this->match_parallel[thread_id].size(); qi++){
+            this->match[qi] = this->match_parallel[thread_id][qi];
+        }
+        // Sync visited_ from thread-local
+        for(uint vi = 0; vi < this->visited_parallel[thread_id].size(); vi++){
+            this->visited_[vi] = this->visited_parallel[thread_id][vi];
+        }
+
         if(currentSearchVertexType == isolatedVertex){
-            // this->queryVec[queryIndex].isolatedVertexTimesAdd(this->matchCandidate[depth]);
-            // std::cout << NUM_L << std::endl;
-            // NUM_L++;
             this->queryVec[queryIndex].isolatedVertexTimesAdd(matchCandidate_parallel[thread_id][depth]);
-            // std::cout << NUM_L << std::endl;
-            // NUM_L++;
         }
         if(depth == this->queryVec[queryIndex].NumVertices() - 1){
             this->addMatchResult(queryIndex, edgeIndex, type);
         }
         else{
-
-            this->Parallel_searchVertex_local(queryIndex, edgeIndex, type, depth + 1, thread_id);
-            // std::cout << NUM_L << std::endl;
-            // NUM_L++;
-            // this->searchVertex(queryIndex, edgeIndex, type, depth + 1);
+            this->searchVertex(queryIndex, edgeIndex, type, depth + 1);
         }
         if(currentSearchVertexType == isolatedVertex){
-            // this->queryVec[queryIndex].isolatedVertexTimesMinus(this->matchCandidate[depth]);
             this->queryVec[queryIndex].isolatedVertexTimesMinus(matchCandidate_parallel[thread_id][depth]);
         }
+        } // end omp critical
+
         // this->popVertex(depth);
         this->popVertex_local(depth, match_parallel[thread_id], matchCandidate_parallel[thread_id], thread_id);
     }
@@ -1538,6 +1710,39 @@ void CSMPP::setMatchVertex(const std::vector<std::pair<uint,uint>> & matchingInd
     }
 }
 
+void CSMPP::unsetMatchVertex(const std::vector<uint> & matchingIndex){
+    for(int i = 0; i < matchingIndex.size(); i++){
+        this->visited_[this->match[matchingIndex[i]]] = false;
+        this->match[matchingIndex[i]] = -1;
+    }
+}
+
+void CSMPP::unsetMatchVertex(const std::vector<std::pair<uint,uint>> & matchingIndex)
+{
+    for(int i = 0; i < matchingIndex.size(); i++){
+        this->match[matchingIndex[i].first] = -1;
+    }
+}
+
+void CSMPP::printMatch(const std::vector<uint> & matchOrder){
+    std::vector<int> matchCopy(match);
+    std::cout << "vertex list" << std::endl;
+    for(int i = 0; i < this->match.size(); i++){
+        std::cout << this->match[i] << " ";
+    }
+    std::cout << std::endl;
+}
+
+void CSMPP::printMatch()
+{
+    std::cout << "print match: " << std::endl;
+    for(auto & u : this->match)
+    {
+        std::cout << u << " ";
+    }
+    std::cout << std::endl;
+}
+
 
 
 
@@ -1549,119 +1754,18 @@ void CSMPP::setMatchVertex(const std::vector<std::pair<uint,uint>> & matchingInd
  * @return {*}
  */
 void CSMPP::addMatchResult(uint queryIndex, uint edgeIndex, searchType type){
-
     const auto & isolateVertexIndex = this->queryVec[queryIndex].getIsolatedVertexIndex(edgeIndex);
     const auto & cacheMap = this->queryVec[queryIndex].getCacheMap(edgeIndex);
-
+    if(print_enumeration_results_){
+        std::vector<std::vector<uint>> needToCombine;
+        for(int i = 0; i < static_cast<int>(isolateVertexIndex.size()); i++){
+            needToCombine.emplace_back(this->matchCandidate[cacheMap[isolateVertexIndex[i]]]);
+        }
         uint depth = this->queryVec[queryIndex].NumVertices();
-        auto & isolatedVertexMap = this->queryVec[queryIndex].isolatedVertexTimes;
-        std::vector<std::vector<int>> needToCombineV1;
-        std::vector<uint> NoOverLeafWeight;
-        bool allSame = true;
-
-        for(int i = 0; i < isolateVertexIndex.size(); i++){
-            const auto & I_isolateVertexCandidate = this->matchCandidate[cacheMap[isolateVertexIndex[i]]];
-            std::vector<int> I_needToCombine;
-            I_needToCombine.reserve(I_isolateVertexCandidate.size());
-            for(int k = 0; k < I_isolateVertexCandidate.size(); k++){
-                int vertex = I_isolateVertexCandidate[k];
-                if(this->visited_[vertex] == true){
-                    continue;
-                }
-                I_needToCombine.push_back(vertex);
-            }
-            if(I_needToCombine.empty()){
-                return;
-            }
-            needToCombineV1.push_back(I_needToCombine);
-            if(allSame && i >= 1){
-                if(needToCombineV1[i - 1].size() != needToCombineV1[i].size()){
-                    allSame = false;
-                }
-            }
-        }
-        if(needToCombineV1.size() == 1){
-            if(type == pos){
-                #pragma omp atomic
-                num_positive_results_ += needToCombineV1[0].size();
-            }
-            else{
-                if(type == neg){
-                    #pragma omp atomic
-                    num_negative_results_ += needToCombineV1[0].size();
-                }
-                else{
-                    #pragma omp atomic
-                    num_initial_results_ += needToCombineV1[0].size();
-                }
-            }
-            
-            return;
-        }
-        if(allSame == true){
-            const auto & firstItem = needToCombineV1[0];
-            for(int k = 1; k < needToCombineV1.size(); k++){
-                const auto & kSelf = needToCombineV1[k];
-                if(firstItem != kSelf){
-                    allSame = false;
-                }
-            }
-            if(allSame == true){
-                size_t Matchresult = 1;
-                for(int i = 0; i < needToCombineV1.size(); i++){
-                    if(firstItem.size() - i <= 0)
-                    {
-                        return;
-                    }
-                    Matchresult *= (firstItem.size() - i);
-                }
-                if(type == pos){
-                    #pragma omp atomic
-                    num_positive_results_ += Matchresult;
-                }
-                else{
-                    if(type == neg){
-                        #pragma omp atomic
-                        num_negative_results_ += Matchresult;
-                    }
-                    else{
-                        #pragma omp atomic
-                        num_initial_results_ += Matchresult;
-                    }
-                }
-                
-                return;
-            }
-        }
-
-        std::vector<std::vector<int>> needToCombine;
-        for(int i = 0; i < needToCombineV1.size(); i++){
-            const auto & I_isolateVertexCandidate = needToCombineV1[i];
-            std::vector<int> I_needToCombine;
-            I_needToCombine.reserve(I_isolateVertexCandidate.size());
-            int I_NoOverLeafWeight = 0;
-            for(int k = 0; k < I_isolateVertexCandidate.size(); k++){
-                int vertex = I_isolateVertexCandidate[k];
-                if(isolatedVertexMap[vertex] > 1){
-                    I_needToCombine.push_back(vertex);
-                }
-                else{
-                    I_NoOverLeafWeight++;
-                }
-            }
-            NoOverLeafWeight.push_back(I_NoOverLeafWeight);
-            if(I_NoOverLeafWeight > 0){
-                I_needToCombine.push_back(-1);
-            }
-            needToCombine.push_back(I_needToCombine);
-        }
-
-        //combine part
-        //init
         this->headRecord[depth].clear();
         this->intersectionResult[depth].clear();
         this->combineStack[depth].clear();
-        for(int i = 0; i < needToCombine.size(); i++){
+        for(int i = 0; i < static_cast<int>(needToCombine.size()); i++){
             headRecord[depth].push_back(needToCombine[i].size());
         }
         this->stackSize[depth] = needToCombine.size();
@@ -1669,22 +1773,152 @@ void CSMPP::addMatchResult(uint queryIndex, uint edgeIndex, searchType type){
         this->combineStack[depth].resize(this->stackSize[depth]);
         this->intersectionResult[depth].resize(this->stackSize[depth]);
         this->type[depth] = finalStack;
-        //combine
+        while(this->headRecord[depth][0] >= 0){
+            while(this->stackHead[depth] < this->stackSize[depth]){
+                if(this->headRecord[depth][this->stackHead[depth]] == 0){
+                    bool pending = this->headChange(needToCombine, depth);
+                    if(!pending){
+                        return;
+                    }
+                }
+                int replaceIndex = this->stackHead[depth];
+                uint currentVertex = needToCombine[replaceIndex][this->headRecord[depth][replaceIndex] - 1];
+                if(this->visited_[currentVertex]){
+                    this->headRecord[depth][replaceIndex]--;
+                }
+                else{
+                    this->combinePushBack(currentVertex, replaceIndex, depth);
+                }
+            }
+            if(type == pos){
+                num_positive_results_ ++;
+            }
+            else if(type == neg){
+                num_negative_results_++;
+            }
+            else{
+                this->num_initial_results_++;
+            }
+            this->setUnVisitedPatch(this->combineStack[depth]);
+            this->setMatchVertex(isolateVertexIndex, this->combineStack[depth]);
+            this->printMatch(this->queryVec[queryIndex].GetMatchOrder(edgeIndex));
+            this->unsetMatchVertex(isolateVertexIndex);
+            this->setVisitedPatch(this->combineStack[depth]);
+            this->combineStackPopTail(depth);
+        }
+    }
+    else{
+        uint depth = this->queryVec[queryIndex].NumVertices();
+        auto & isolatedVertexMap = this->queryVec[queryIndex].isolatedVertexTimes;
+        std::vector<std::vector<int>> needToCombineV1;
+        std::vector<uint> NoOverLeafWeight;
+        bool allSame = true;
+        for(int i = 0; i < static_cast<int>(isolateVertexIndex.size()); i++){
+            const auto & isolateCandidate = this->matchCandidate[cacheMap[isolateVertexIndex[i]]];
+            std::vector<int> oneNeedToCombine;
+            oneNeedToCombine.reserve(isolateCandidate.size());
+            for(int k = 0; k < static_cast<int>(isolateCandidate.size()); k++){
+                int vertex = isolateCandidate[k];
+                if(this->visited_[vertex]){
+                    continue;
+                }
+                oneNeedToCombine.push_back(vertex);
+            }
+            if(oneNeedToCombine.empty()){
+                return;
+            }
+            needToCombineV1.push_back(oneNeedToCombine);
+            if(allSame && i >= 1 && needToCombineV1[i - 1].size() != needToCombineV1[i].size()){
+                allSame = false;
+            }
+        }
+        if(needToCombineV1.size() == 1){
+            if(type == pos){
+                num_positive_results_ += needToCombineV1[0].size();
+            }
+            else if(type == neg){
+                num_negative_results_ += needToCombineV1[0].size();
+            }
+            else{
+                num_initial_results_ += needToCombineV1[0].size();
+            }
+            return;
+        }
+        if(allSame){
+            const auto & firstItem = needToCombineV1[0];
+            for(int k = 1; k < static_cast<int>(needToCombineV1.size()); k++){
+                if(firstItem != needToCombineV1[k]){
+                    allSame = false;
+                    break;
+                }
+            }
+            if(allSame){
+                size_t matchResult = 1;
+                for(int i = 0; i < static_cast<int>(needToCombineV1.size()); i++){
+                    if(firstItem.size() <= static_cast<size_t>(i)){
+                        return;
+                    }
+                    matchResult *= (firstItem.size() - i);
+                }
+                if(type == pos){
+                    num_positive_results_ += matchResult;
+                }
+                else if(type == neg){
+                    num_negative_results_ += matchResult;
+                }
+                else{
+                    num_initial_results_ += matchResult;
+                }
+                return;
+            }
+        }
+        std::vector<std::vector<int>> needToCombine;
+        for(int i = 0; i < static_cast<int>(needToCombineV1.size()); i++){
+            const auto & isolateCandidate = needToCombineV1[i];
+            std::vector<int> oneNeedToCombine;
+            oneNeedToCombine.reserve(isolateCandidate.size());
+            int noOverlapLeafWeight = 0;
+            for(int k = 0; k < static_cast<int>(isolateCandidate.size()); k++){
+                int vertex = isolateCandidate[k];
+                if(isolatedVertexMap[vertex] > 1){
+                    oneNeedToCombine.push_back(vertex);
+                }
+                else{
+                    noOverlapLeafWeight++;
+                }
+            }
+            NoOverLeafWeight.push_back(noOverlapLeafWeight);
+            if(noOverlapLeafWeight > 0){
+                oneNeedToCombine.push_back(-1);
+            }
+            needToCombine.push_back(oneNeedToCombine);
+        }
+
+        this->headRecord[depth].clear();
+        this->intersectionResult[depth].clear();
+        this->combineStack[depth].clear();
+        for(int i = 0; i < static_cast<int>(needToCombine.size()); i++){
+            headRecord[depth].push_back(needToCombine[i].size());
+        }
+        this->stackSize[depth] = needToCombine.size();
+        this->stackHead[depth] = 0;
+        this->combineStack[depth].resize(this->stackSize[depth]);
+        this->intersectionResult[depth].resize(this->stackSize[depth]);
+        this->type[depth] = finalStack;
         size_t totalMatch = 1;
         int currentVertex;
         int replaceIndex;
         while(this->headRecord[depth][0] >= 0){
-            //1.push back stack
             while(this->stackHead[depth] < this->stackSize[depth]){
                 if(this->headRecord[depth][this->stackHead[depth]] == 0){
                     bool pending = this->headChange(needToCombine, depth, totalMatch, NoOverLeafWeight);
-                    if(pending == false){
+                    if(!pending){
                         return;
                     }
                 }
-                replaceIndex = this->stackHead[depth];// need to add
+                replaceIndex = this->stackHead[depth];
                 currentVertex = needToCombine[replaceIndex][this->headRecord[depth][replaceIndex] - 1];
-                if(currentVertex != -1 && this->visited_[currentVertex] == true){
+                if(currentVertex != -1 && this->visited_[currentVertex]){
                     this->headRecord[depth][replaceIndex]--;
                 }
                 else{
@@ -1692,24 +1926,17 @@ void CSMPP::addMatchResult(uint queryIndex, uint edgeIndex, searchType type){
                 }
             }
             if(type == pos){
-                #pragma omp atomic
                 num_positive_results_ += totalMatch;
             }
-            else{
-                if(type == neg){
-                    #pragma omp atomic
-                    num_negative_results_ += totalMatch;
-                }
-                else{
-                    #pragma omp atomic
-                    num_initial_results_ += totalMatch;
-                }
-                
+            else if(type == neg){
+                num_negative_results_ += totalMatch;
             }
-            
+            else{
+                num_initial_results_ += totalMatch;
+            }
             this->combineStackPopTail(depth, totalMatch, NoOverLeafWeight);
         }
-    // }
+    }
 }
 
 
@@ -1764,11 +1991,9 @@ void CSMPP::matchVertexlocal(std::vector<uint> & Candidate, uint pos, std::vecto
 }
 
 void CSMPP::matchVertexAll(std::vector<uint> & Candidate, uint pos){
-    // this->match[pos] = -1;
-    // this->matchCandidate[pos] = std::move(Candidate);
     for(int i =0; i < Thread_MAX; i++){
         match_parallel[i][pos] = -1;
-        matchCandidate_parallel[i][pos] = std::move(Candidate);
+        matchCandidate_parallel[i][pos] = Candidate; // copy, not move! move empties Candidate after 1st iteration
     }
 }
 

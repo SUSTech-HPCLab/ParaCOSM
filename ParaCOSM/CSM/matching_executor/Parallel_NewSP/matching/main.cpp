@@ -137,11 +137,12 @@ int main(int argc, char *argv[])
             }
             else if (insert.type == 'e' && !insert.is_add)
             {
-                mm->Safe_Update_remove(insert.id1, insert.id2);
-
+                // Must search BEFORE removing the edge from graph
                 if(!mm->safe_detect(insert.id1, insert.id2, insert.label, neg)){
                     mm->RemoveEdge(insert.id1, insert.id2);
                 }
+
+                mm->Safe_Update_remove(insert.id1, insert.id2);
                 
                 num_e_updates ++;
             }
