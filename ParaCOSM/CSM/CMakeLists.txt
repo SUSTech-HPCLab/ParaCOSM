@@ -33,12 +33,18 @@ add_compile_options(
 # -----------------------------
 set(TBB_ROOT ${ONEAPI_ROOT}/tbb/latest)
 set(TBB_INC ${TBB_ROOT}/include)
-set(TBB_LIB_DIR ${TBB_ROOT}/lib/intel64/gcc4.8)
+
+# Auto-detect TBB lib directory (different oneAPI versions use different layouts)
+if(EXISTS "${TBB_ROOT}/lib/intel64/gcc4.8")
+    set(TBB_LIB_DIR ${TBB_ROOT}/lib/intel64/gcc4.8)
+else()
+    set(TBB_LIB_DIR ${TBB_ROOT}/lib)
+endif()
 
 include_directories(
     ${TBB_INC}
     ${CMAKE_SOURCE_DIR}
-    ${CMAKE_SOURCE_DIR}/external/taskflow
+    ${CMAKE_SOURCE_DIR}/external
 )
  
 link_directories(${TBB_LIB_DIR})
@@ -195,35 +201,5 @@ set_target_properties(parallel_newsp PROPERTIES
 
 
 ### -----------------------------
-### 12. Build Parallel_NewSP via its own CMake and copy artifact
+### 12. (Removed: Parallel_NewSP ExternalProject — now built directly as parallel_newsp target above)
 ### -----------------------------
-include(ExternalProject)
-
-set(PARALLEL_NEWSP_SOURCE_DIR ${CMAKE_SOURCE_DIR}/matching_executor/Parallel_NewSP)
-set(PARALLEL_NEWSP_BINARY_DIR ${CMAKE_BINARY_DIR}/_build_parallel_newsp)
-
-ExternalProject_Add(parallel_newsp_external
-    SOURCE_DIR ${PARALLEL_NEWSP_SOURCE_DIR}
-    BINARY_DIR ${PARALLEL_NEWSP_BINARY_DIR}
-    CMAKE_ARGS
-        -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
-        -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}
-        -DINTEL_COMPILER_ROOT=${INTEL_COMPILER_ROOT}
-    BUILD_COMMAND ${CMAKE_COMMAND} --build .
-    INSTALL_COMMAND ""
-    BUILD_BYPRODUCTS ${PARALLEL_NEWSP_BINARY_DIR}/build/csm
-)
-
-# Copy the external build result into the main output directory with a distinct name
-add_custom_command(
-    OUTPUT ${MAIN_OUTPUT_DIR}/parallel_newsp_csm
-    COMMAND ${CMAKE_COMMAND} -E make_directory ${MAIN_OUTPUT_DIR}
-    COMMAND ${CMAKE_COMMAND} -E copy
-            ${PARALLEL_NEWSP_BINARY_DIR}/build/csm
-            ${MAIN_OUTPUT_DIR}/parallel_newsp_csm
-    DEPENDS parallel_newsp_external
-)
-
-add_custom_target(bundle_parallel_newsp ALL
-    DEPENDS ${MAIN_OUTPUT_DIR}/parallel_newsp_csm
-)

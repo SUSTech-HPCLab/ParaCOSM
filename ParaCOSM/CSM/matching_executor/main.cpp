@@ -131,6 +131,10 @@ inline void RunUpdates_InterExecutor(Graph& data_graph, matching* mm, size_t& nu
         executor.BatchUpdates3(
             num_v_updates, num_e_updates, unsafe_updates, count,
             positive_num_results_last, negative_num_results_last, reach_time_limit);
+    } else if (update_mode == "batch4") {
+        executor.BatchUpdates4(
+            num_v_updates, num_e_updates, unsafe_updates, count,
+            positive_num_results_last, negative_num_results_last, reach_time_limit);
     } else if (update_mode == "openmp") {
         executor.BatchUpdates_OpenMP(
             num_v_updates, num_e_updates, unsafe_updates, count,
@@ -159,7 +163,7 @@ int main(int argc, char *argv[])
     CLI::App app{"App description"};
 
     std::string query_path = "", initial_path = "", stream_path = "", algorithm = "none";
-    std::string update_mode = "batch3"; // batch, batch2, batch3, openmp, queue, single
+    std::string update_mode = "batch3"; // batch, batch2, batch3, batch4, openmp, queue, single
     uint max_num_results = UINT_MAX, time_limit = UINT_MAX, initial_time_limit = UINT_MAX;
     bool print_prep = true, print_enum = false, homo = false, report_initial = true;
     std::vector<std::vector<uint>> orders;
@@ -182,7 +186,7 @@ int main(int argc, char *argv[])
     app.add_option("--orders", orders, "pre-defined matching orders");
     app.add_option("-t,--thread-num", thread_num, "Number of thread that program will use.");
     app.add_option("--auto-tuning", auto_tuning, "Framework will tune the thread number with query vertex");
-    app.add_option("-m,--update-mode", update_mode, "Update strategy: batch | batch2 | batch3 | openmp | queue | single");
+    app.add_option("-m,--update-mode", update_mode, "Update strategy: batch | batch2 | batch3 | batch4 | openmp | queue | single");
 
     
     CLI11_PARSE(app, argc, argv);
@@ -301,18 +305,7 @@ int main(int argc, char *argv[])
         // auto timer = std::chrono::high_resolution_clock::now();
         start = My_Get_Time();
 
-        // Select update strategy
-        enum class UpdateMode { Batch, Batch2, Batch3, OpenMP, Queue, Single };
-        UpdateMode mode = UpdateMode::Batch3;
-        if (update_mode == "batch")      mode = UpdateMode::Batch;
-        else if (update_mode == "batch2") mode = UpdateMode::Batch2;
-        else if (update_mode == "batch3") mode = UpdateMode::Batch3;
-        else if (update_mode == "openmp") mode = UpdateMode::OpenMP;
-        else if (update_mode == "queue")  mode = UpdateMode::Queue;
-        else if (update_mode == "single") mode = UpdateMode::Single;
-        else {
-            std::cout << "Unknown update mode '" << update_mode << "', fallback to batch3" << std::endl;
-        }
+        // Select update strategy (mode variable removed as it's not used)
 
         RunUpdates_InterExecutor(
             data_graph, mm, num_v_updates, num_e_updates, unsafe_updates, count,

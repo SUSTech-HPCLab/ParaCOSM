@@ -3,7 +3,9 @@
 #include <iostream>
 #include "inter_executor.h"
 #include "matching_executor/matching.h"
+#include "matching_executor/Parallel_GraphFlow/parallel_graphflow.h"
 #include "graph_storage/graph.h"
+#include "taskflow/taskflow.hpp"
 
 // Constructor implementation
 /**
@@ -460,6 +462,243 @@ void InterExecutor::SingleThreadUpdate(
             unsafe_updates++;
         }
     }
+}
+
+/**
+ * BatchUpdates_Taskflow
+ *
+ * Taskflow-based parallel batch processing. Similar to BatchUpdates2 but uses Taskflow
+ * for better parallel task scheduling. Pulls a batch from the queue, classifies updates
+ * in parallel using Taskflow tasks, and applies unsafe updates sequentially.
+ *
+ * Parameters:
+ * - num_v_updates: cumulative counter of vertex updates
+ * - num_e_updates: cumulative counter of edge updates
+ * - unsafe_updates: increments when results change after applying updates
+ * - count: external total update counter (not modified here)
+ * - positive_num_results_last / negative_num_results_last: previous result counters to detect changes
+ * - reach_time_limit: stop early if set to true
+ */
+void InterExecutor::BatchUpdates_Taskflow(
+    size_t& num_v_updates,
+    size_t& num_e_updates,
+    size_t& unsafe_updates,
+    size_t& count,
+    size_t& positive_num_results_last,
+    size_t& negative_num_results_last,
+    std::atomic_bool& reach_time_limit
+) {
+    const size_t batch_size = 400;
+    const size_t num_threads = 16;
+
+    // Create Taskflow executor
+    tf::Executor executor(num_threads);
+    tf::Taskflow taskflow;
+
+    std::vector<InsertUnit> batch_updates;
+    batch_updates.reserve(batch_size);
+    std::vector<bool> is_safes(batch_size, false);
+    std::vector<size_t> num_e_update_vec(batch_size, 0ul);
+    
+    std::atomic<bool> safe(true);
+    std::atomic<size_t> idx_update(batch_size + 5);
+    std::atomic<size_t> local_v_updates(0);
+
+    while (!data_graph_.updates_.empty() && !reach_time_limit) {
+        batch_updates.clear();
+        safe.store(true);
+        is_safes.assign(batch_size, false);
+        num_e_update_vec.assign(batch_size, 0ul);
+        idx_update.store(batch_size + 5);
+        local_v_updates.store(0);
+
+        // Pop batch from queue (single-threaded)
+        for (size_t i = 0; i < batch_size && !data_graph_.updates_.empty(); ++i) {
+            batch_updates.push_back(data_graph_.updates_.front());
+            data_graph_.updates_.pop();
+        }
+
+        if (batch_updates.empty()) {
+            break;
+        }
+
+        // Create Taskflow tasks for parallel classification
+        taskflow.clear();
+        
+        // Parallel classification tasks
+        for (size_t cnt = 0; cnt < batch_updates.size(); cnt++) {
+            taskflow.emplace([this, &batch_updates, &is_safes, &num_e_update_vec, 
+                             &safe, &idx_update, &local_v_updates, cnt]() {
+                if (!safe.load()) {
+                    return;
+                }
+
+                const auto& insert = batch_updates[cnt];
+                if (insert.type == 'e' && insert.is_add) {
+                    is_safes[cnt] = matching_instance_->Classify(insert.id1, insert.id2, insert.label);
+                    num_e_update_vec[cnt]++;
+                    
+                    if (!is_safes[cnt]) {
+                        safe.store(false);
+                        size_t current_idx = idx_update.load();
+                        while (current_idx > cnt && 
+                               !idx_update.compare_exchange_weak(current_idx, cnt)) {
+                            current_idx = idx_update.load();
+                        }
+                    }
+                } else if (insert.type == 'v' && insert.is_add) {
+                    // Vertex additions can be handled immediately
+                    matching_instance_->AddVertex(insert.id1, insert.label);
+                    local_v_updates++;
+                } else if (insert.type == 'v' && !insert.is_add) {
+                    // Vertex removals are unsafe
+                    safe.store(false);
+                    size_t current_idx = idx_update.load();
+                    while (current_idx > cnt && 
+                           !idx_update.compare_exchange_weak(current_idx, cnt)) {
+                        current_idx = idx_update.load();
+                    }
+                } else if (insert.type == 'e' && !insert.is_add) {
+                    is_safes[cnt] = matching_instance_->Classify(insert.id1, insert.id2, insert.label);
+                    num_e_update_vec[cnt]++;
+                    
+                    if (!is_safes[cnt]) {
+                        safe.store(false);
+                        size_t current_idx = idx_update.load();
+                        while (current_idx > cnt && 
+                               !idx_update.compare_exchange_weak(current_idx, cnt)) {
+                            current_idx = idx_update.load();
+                        }
+                    }
+                }
+            });
+        }
+
+        // Execute all classification tasks in parallel
+        executor.run(taskflow).wait();
+
+        // Accumulate vertex updates
+        num_v_updates += local_v_updates.load();
+
+        // Apply unsafe updates sequentially
+        if (!safe.load()) {
+            size_t unsafe_idx = idx_update.load();
+            for (size_t i = unsafe_idx; i < batch_updates.size(); i++) {
+                const auto& insert = batch_updates[i];
+                if (insert.type == 'e' && insert.is_add) {
+                    matching_instance_->AddEdge(insert.id1, insert.id2, insert.label);
+                } else if (insert.type == 'e' && !insert.is_add) {
+                    matching_instance_->RemoveEdge(insert.id1, insert.id2);
+                } else if (insert.type == 'v' && !insert.is_add) {
+                    matching_instance_->RemoveVertex(insert.id1);
+                }
+
+                // Check if results changed
+                size_t positive_num_results_cur = 0ul, negative_num_results_cur = 0ul;
+                matching_instance_->GetNumPositiveResults(positive_num_results_cur);
+                matching_instance_->GetNumNegativeResults(negative_num_results_cur);
+                
+                if (positive_num_results_cur != positive_num_results_last ||
+                    negative_num_results_cur != negative_num_results_last) {
+                    positive_num_results_last = positive_num_results_cur;
+                    negative_num_results_last = negative_num_results_cur;
+                    unsafe_updates++;
+                }
+            }
+        }
+
+        // Accumulate edge update counts
+        for (size_t i = 0; i < num_e_update_vec.size(); i++) {
+            num_e_updates += num_e_update_vec[i];
+        }
+    }
+}
+
+/**
+ * BatchUpdates4
+ *
+ * 串行地遍历 `data_graph_.updates_vec_` 中的所有更新：
+ *  - 顶点增加/删除：直接调用 AddVertex / RemoveVertex
+ *  - 边增加/删除：直接调用 AddEdge / RemoveEdge
+ * 每次更新后通过全局结果计数器判断是否发生结果变化，从而统计
+ * 「unsafe updates」。该实现完全单线程，方便与现有策略做结果对比，
+ * 后续也可以在「每个 update 为一个任务单元」的基础上引入 Taskflow 并行。
+ */
+void InterExecutor::BatchUpdates4(
+    size_t& num_v_updates,
+    size_t& num_e_updates,
+    size_t& unsafe_updates,
+    size_t& count,
+    size_t& positive_num_results_last,
+    size_t& negative_num_results_last,
+    std::atomic_bool& reach_time_limit
+) {
+    (void)count;           // 当前策略不使用该计数器
+    (void)reach_time_limit; // 暂时忽略时间限制
+
+    const size_t update_size = data_graph_.updates_vec_.size();
+    std::cout << "Start BatchUpdates4 with " << update_size << " updates" << std::endl;
+
+    // 使用单线程 Taskflow，将「每个 update 一个 task」串行执行。
+    tf::Executor executor(1);
+    tf::Taskflow taskflow;
+
+    std::vector<tf::Task> tasks;
+    tasks.reserve(update_size);
+
+    for (size_t i = 0; i < update_size; ++i) {
+        const InsertUnit& insert = data_graph_.updates_vec_[i];
+
+        // 为每个 update 创建一个 task，接收 Subflow 以支持内层动态展开
+        auto t = taskflow.emplace([this,
+                                   &num_v_updates,
+                                   &num_e_updates,
+                                   &unsafe_updates,
+                                   &positive_num_results_last,
+                                   &negative_num_results_last,
+                                   &insert](tf::Subflow& sf) {
+            if (insert.type == 'v' && insert.is_add) {
+                matching_instance_->AddVertex(insert.id1, insert.label);
+                num_v_updates++;
+            } else if (insert.type == 'v' && !insert.is_add) {
+                matching_instance_->RemoveVertex(insert.id1);
+                num_v_updates++;
+            } else if (insert.type == 'e' && insert.is_add) {
+                if (auto* pg = dynamic_cast<Parallel_Graphflow*>(matching_instance_)) {
+                    pg->AddEdgeWithSubflow(insert.id1, insert.id2, insert.label, sf);
+                } else {
+                    matching_instance_->AddEdge(insert.id1, insert.id2, insert.label);
+                }
+                num_e_updates++;
+            } else if (insert.type == 'e' && !insert.is_add) {
+                if (auto* pg = dynamic_cast<Parallel_Graphflow*>(matching_instance_)) {
+                    pg->RemoveEdgeWithSubflow(insert.id1, insert.id2, sf);
+                } else {
+                    matching_instance_->RemoveEdge(insert.id1, insert.id2);
+                }
+                num_e_updates++;
+            }
+
+            // 参考 SingleThreadUpdate 的统计方式，判断本次更新是否为「unsafe」
+            size_t positive_num_results_cur = 0ul, negative_num_results_cur = 0ul;
+            matching_instance_->GetNumPositiveResults(positive_num_results_cur);
+            matching_instance_->GetNumNegativeResults(negative_num_results_cur);
+            if (positive_num_results_cur != positive_num_results_last ||
+                negative_num_results_cur != negative_num_results_last) {
+                positive_num_results_last = positive_num_results_cur;
+                negative_num_results_last = negative_num_results_cur;
+                unsafe_updates++;
+            }
+        });
+
+        tasks.push_back(t);
+        if (i > 0) {
+            // 保证更新按原来的顺序执行，即第 i-1 个任务先于第 i 个任务
+            tasks[i - 1].precede(tasks[i]);
+        }
+    }
+
+    executor.run(taskflow).wait();
 }
 
 /**

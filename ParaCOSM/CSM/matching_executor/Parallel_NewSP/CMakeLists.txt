@@ -14,10 +14,22 @@ set(CMAKE_CXX_FLAGS_RELEASE "-O3")
 set(CMAKE_CXX_FLAGS_DEBUG   "-g")
 
 # ========= OneAPI & TBB 路径 =========
-set(ONEAPI_ROOT "/home/cc/intel/oneapi")
+if(DEFINED ENV{ONEAPI_ROOT})
+    set(ONEAPI_ROOT $ENV{ONEAPI_ROOT})
+elseif(DEFINED ONEAPI_ROOT)
+    # keep as-is (passed via -D)
+else()
+    set(ONEAPI_ROOT "$ENV{HOME}/intel/oneapi")
+endif()
+
 set(TBB_ROOT "${ONEAPI_ROOT}/tbb/latest")
 set(TBB_INC "${TBB_ROOT}/include")
-set(TBB_LIB_DIR "${TBB_ROOT}/lib/intel64/gcc4.8")
+
+if(EXISTS "${TBB_ROOT}/lib/intel64/gcc4.8")
+    set(TBB_LIB_DIR "${TBB_ROOT}/lib/intel64/gcc4.8")
+else()
+    set(TBB_LIB_DIR "${TBB_ROOT}/lib")
+endif()
 
 include_directories(${TBB_INC})
 link_directories(${TBB_LIB_DIR})

@@ -175,6 +175,42 @@ public:
     );
 
     /**
+     * @brief Taskflow-based parallel batch processing
+     * 
+     * Uses Taskflow library to parallelize the classification and processing
+     * of graph updates. Similar to BatchUpdates2 but uses Taskflow's task
+     * graph for better parallel scheduling.
+     */
+    void BatchUpdates_Taskflow(
+        size_t& num_v_updates,
+        size_t& num_e_updates,
+        size_t& unsafe_updates,
+        size_t& count,
+        size_t& positive_num_results_last,
+        size_t& negative_num_results_last,
+        std::atomic_bool& reach_time_limit
+    );
+
+    /**
+     * @brief Sequential batch processing over updates_vec_ (BatchUpdates4).
+     *
+     * 这个策略按顺序遍历 `data_graph_.updates_vec_` 中的所有更新，
+     * 对每条更新直接调用匹配器的 AddEdge / RemoveEdge /
+     * AddVertex / RemoveVertex 接口，并在每次更新后统计结果变化，
+     * 以统计「unsafe updates」。该实现是单线程的，适合作为
+     * 在引入 Taskflow 并行之前的基线版本。
+     */
+    void BatchUpdates4(
+        size_t& num_v_updates,
+        size_t& num_e_updates,
+        size_t& unsafe_updates,
+        size_t& count,
+        size_t& positive_num_results_last,
+        size_t& negative_num_results_last,
+        std::atomic_bool& reach_time_limit
+    );
+
+    /**
      * DegreePruning
      *
      * Check degree-based pruning constraints for mapping query vertices (u1, u2)
