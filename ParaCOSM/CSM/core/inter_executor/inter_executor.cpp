@@ -1,6 +1,9 @@
 #include <vector>
 #include <atomic>
 #include <iostream>
+#include <thread>
+#include <functional>
+#include <immintrin.h>
 #include <omp.h>
 #include "inter_executor.h"
 #include "matching_executor/matching.h"
@@ -979,51 +982,100 @@ void InterExecutor::BatchUpdates_Persistent(
     std::atomic_bool& reach_time_limit,
     size_t num_threads
 ) {
-    const size_t WINDOW = 32;
+    const size_t WINDOW = 128;
     const size_t update_size = data_graph_.updates_vec_.size();
+    if (num_threads < 2) num_threads = 2;
+    const size_t classify_threads = num_threads - 1; // reserve main thread
 
-    // Per-slot classification result: 0=unknown, 1=safe, 2=unsafe
+    // ---- Build a persistent std::thread pool for Classify (separate from OMP) ----
     std::vector<uint8_t> slot_safe(WINDOW, 0);
+    std::atomic<size_t> classify_next{0};
+    std::atomic<size_t> classify_done{0};
+    size_t classify_count = 0;
+    std::atomic<uint64_t> classify_epoch{0};
+    std::atomic<bool> pool_stop{false};
+    size_t classify_base = 0; // window base for classify workers
+
+    auto classify_worker = [&](size_t /*tid*/) {
+        uint64_t last_epoch = 0;
+        while (!pool_stop.load(std::memory_order_relaxed)) {
+            uint64_t cur = classify_epoch.load(std::memory_order_acquire);
+            if (cur == last_epoch) { _mm_pause(); continue; }
+            last_epoch = cur;
+            while (true) {
+                size_t idx = classify_next.fetch_add(1, std::memory_order_relaxed);
+                if (idx >= classify_count) break;
+                if (slot_safe[idx] != 0) {
+                    classify_done.fetch_add(1, std::memory_order_release);
+                    continue;
+                }
+                const auto& update = data_graph_.updates_vec_[idx + classify_base];
+                bool safe = matching_instance_->Classify(update.id1, update.id2, update.label);
+                slot_safe[idx] = safe ? 1 : 2;
+                classify_done.fetch_add(1, std::memory_order_release);
+            }
+        }
+    };
+
+    // Launch classify workers
+    std::vector<std::thread> classify_pool;
+    for (size_t i = 0; i < classify_threads; i++)
+        classify_pool.emplace_back(classify_worker, i);
+
+    // ---- Main update loop (main thread) ----
     size_t sliding_window_base = 0;
 
     while (sliding_window_base < update_size) {
-        const size_t window_end = std::min(sliding_window_base + WINDOW, update_size);
-        const size_t actual_window = window_end - sliding_window_base;
+        const size_t actual = std::min(WINDOW, update_size - sliding_window_base);
 
-        // Phase 1: Apply all safe vertex-adds in order (serial, very fast)
-        // This ensures Classify sees new vertices for subsequent edges
-        for (size_t i = 0; i < actual_window; i++) {
+        // Phase 1: vertex-adds + mark edges (main thread, fast)
+        for (size_t i = 0; i < actual; i++) {
             const auto& update = data_graph_.updates_vec_[i + sliding_window_base];
             if (update.type == 'v' && update.is_add) {
                 matching_instance_->AddVertex(update.id1, update.label);
-                slot_safe[i] = 1; // safe
+                slot_safe[i] = 1;
             } else if (update.type == 'v' && !update.is_add) {
-                slot_safe[i] = 2; // unsafe: vertex removal
+                slot_safe[i] = 2;
             } else {
-                slot_safe[i] = 0; // edge: needs classification
+                slot_safe[i] = 0; // needs classify
             }
         }
 
-        // Phase 2: Parallel classification of all edge updates
-        #pragma omp parallel for num_threads(num_threads) schedule(static)
-        for (size_t i = 0; i < actual_window; i++) {
-            if (slot_safe[i] != 0) continue; // already classified
-            const auto& update = data_graph_.updates_vec_[i + sliding_window_base];
+        // Phase 2: dispatch classify to std::thread pool
+        classify_base = sliding_window_base;
+        classify_count = actual;
+        classify_next.store(0, std::memory_order_relaxed);
+        classify_done.store(0, std::memory_order_relaxed);
+        classify_epoch.fetch_add(1, std::memory_order_release); // wake workers
+
+        // Main thread also helps classify
+        while (true) {
+            size_t idx = classify_next.fetch_add(1, std::memory_order_relaxed);
+            if (idx >= actual) break;
+            if (slot_safe[idx] != 0) {
+                classify_done.fetch_add(1, std::memory_order_release);
+                continue;
+            }
+            const auto& update = data_graph_.updates_vec_[idx + sliding_window_base];
             bool safe = matching_instance_->Classify(update.id1, update.id2, update.label);
-            slot_safe[i] = safe ? 1 : 2;
+            slot_safe[idx] = safe ? 1 : 2;
+            classify_done.fetch_add(1, std::memory_order_release);
         }
 
-        // Phase 3: Find first unsafe
-        size_t first_unsafe = actual_window;
-        for (size_t i = 0; i < actual_window; i++) {
-            if (slot_safe[i] == 2) {
-                first_unsafe = i;
-                break;
-            }
+        // Wait for all classify done
+        while (classify_done.load(std::memory_order_acquire) < actual) { _mm_pause(); }
+
+        // Ensure workers have drained (set next past end)
+        classify_next.store(actual + classify_threads + 1, std::memory_order_release);
+
+        // Phase 3: find first unsafe
+        size_t first_unsafe = actual;
+        for (size_t i = 0; i < actual; i++) {
+            if (slot_safe[i] == 2) { first_unsafe = i; break; }
         }
 
-        if (first_unsafe < actual_window) {
-            // Phase 4: Apply the unsafe update
+        if (first_unsafe < actual) {
+            // Phase 4: apply unsafe update (AddEdge uses OMP internally — no conflict!)
             const auto& unsafe_update = data_graph_.updates_vec_[first_unsafe + sliding_window_base];
             ApplyUnsafeUpdate(unsafe_update);
 
@@ -1040,8 +1092,13 @@ void InterExecutor::BatchUpdates_Persistent(
                 unsafe_updates++;
             }
         } else {
-            sliding_window_base += actual_window;
-            num_e_updates += actual_window;
+            sliding_window_base += actual;
+            num_e_updates += actual;
         }
     }
+
+    // Shutdown classify pool
+    pool_stop.store(true, std::memory_order_release);
+    classify_epoch.fetch_add(1, std::memory_order_release);
+    for (auto& t : classify_pool) t.join();
 }
