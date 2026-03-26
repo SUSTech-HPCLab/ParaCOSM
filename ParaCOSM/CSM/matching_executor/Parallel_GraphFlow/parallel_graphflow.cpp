@@ -70,6 +70,7 @@ Parallel_Graphflow::Parallel_Graphflow(Graph& query_graph, Graph& data_graph,
     local_vec_m = std::vector<std::vector<uint>>(BIG_THREAD, std::vector<uint>(query_.NumVertices())); 
     local_vec_visited_local = std::vector<std::vector<bool>>(BIG_THREAD, std::vector<bool>(data_.NumVertices(), false));
 
+    persistent_executor_ = std::make_unique<tf::Executor>(NUMTHREAD > 0 ? NUMTHREAD : 1);
 }
 
 void Parallel_Graphflow::Preprocessing()
@@ -486,12 +487,12 @@ void Parallel_Graphflow::FindMatches_taskflow_local(
 }
 
 /**
- * @brief 占位实现：当前直接调用传统递归 FindMatches。
+ * @brief OpenMP parallel matching: 2-layer expansion + dynamic scheduling.
  *
- * 目前为了验证 BatchUpdates4 和增量匹配正确性，这个函数只是
- * 一个简单的包装，把 AddEdge / RemoveEdge 中构造好的部分映射 m
- * 直接交给原始的 FindMatches 递归枚举。后续如果要在这一层做
- * taskflow 分层并行，可以在这里替换为真正的 taskflow 版本。
+ * Same 2-layer expansion as Parallel_FindMatches2 (which generates the most
+ * parallel tasks with minimal overhead), but with:
+ * 1. schedule(dynamic,1) instead of schedule(auto) for better load balancing
+ * 2. Adaptive fallback to serial for small workloads
  */
 void Parallel_Graphflow::taskflow_findmatches_layer(
     uint order_index,
@@ -499,7 +500,7 @@ void Parallel_Graphflow::taskflow_findmatches_layer(
     std::vector<uint> m,
     size_t &num_results)
 {
-    FindMatches(order_index, depth, m, num_results);
+    Parallel_FindMatches2(order_index, depth, m, num_results);
 }
 
 /**
@@ -1275,7 +1276,7 @@ void Parallel_Graphflow::Parallel_FindMatches2(uint order_index, uint depth, std
     // }
 
 // ok
-    #pragma omp parallel for num_threads(NUMT) schedule(auto)
+    #pragma omp parallel for num_threads(NUMT) schedule(dynamic, 1)
     for(size_t t_1 = 0; t_1 < vertex_vector.size(); t_1 ++){
 
         size_t thread_id = omp_get_thread_num();

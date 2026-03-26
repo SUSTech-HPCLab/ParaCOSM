@@ -42,6 +42,9 @@ private:
 
     mutable std::mutex enum_result_mutex_;
 
+    // Persistent executor to avoid per-call thread pool creation overhead
+    std::unique_ptr<tf::Executor> persistent_executor_;
+
     size_t NUMTHREAD;
     size_t auto_tuning;
 
