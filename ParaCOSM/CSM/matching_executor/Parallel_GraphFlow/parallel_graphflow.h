@@ -80,6 +80,14 @@ public:
     void AddEdge(uint v1, uint v2, uint label) override;
     void RemoveEdge(uint v1, uint v2) override;
 
+    // Single OMP parallel region for entire update stream
+    void PersistentParallelUpdate(
+        Graph& data_graph,
+        size_t& num_v_updates, size_t& num_e_updates,
+        size_t& unsafe_updates,
+        size_t& positive_num_results_last,
+        size_t& negative_num_results_last);
+
     void AddEdgeWithSubflow(uint v1, uint v2, uint label, tf::Subflow& sf);
     void RemoveEdgeWithSubflow(uint v1, uint v2, tf::Subflow& sf);
     void AddVertex(uint id, uint label) override;
@@ -184,6 +192,9 @@ private:
         size_t &num_results, size_t thread_id);
 
     void Parallel_FindMatches2(uint order_index, uint depth, std::vector<uint> m, size_t &num_results);
+
+    // Inner version: uses #pragma omp for (works inside existing parallel region)
+    void Parallel_FindMatches2_inner(uint order_index, uint depth, std::vector<uint>& m, size_t &num_results);
 
     void Process_vertex_queue(uint order_index, uint depth, std::vector<uint> m, size_t &num_results);
 
