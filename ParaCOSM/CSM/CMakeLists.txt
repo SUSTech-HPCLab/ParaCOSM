@@ -3,14 +3,8 @@ cmake_minimum_required(VERSION 3.16)
 # -----------------------------
 # 1. Set Intel oneAPI compiler
 # -----------------------------
-# Auto-detect oneAPI root: use ONEAPI_ROOT env var, or fallback to ~/intel/oneapi
-if(DEFINED ENV{ONEAPI_ROOT})
-    set(ONEAPI_ROOT $ENV{ONEAPI_ROOT})
-else()
-    set(ONEAPI_ROOT "$ENV{HOME}/intel/oneapi")
-endif()
-
-set(INTEL_COMPILER_ROOT ${ONEAPI_ROOT}/compiler/latest)
+set(ONEAPI_ROOT $ENV{HOME}/intel/oneapi)
+set(INTEL_COMPILER_ROOT ${ONEAPI_ROOT}/compiler/2025.3)
 set(CMAKE_CXX_COMPILER ${INTEL_COMPILER_ROOT}/bin/icpx)
 set(CMAKE_LINKER ${INTEL_COMPILER_ROOT}/bin/icpx)
 
