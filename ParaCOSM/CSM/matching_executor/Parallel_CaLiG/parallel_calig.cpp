@@ -13,8 +13,8 @@
 #include <functional>
 #include <stdlib.h>
 
-// #include <ska::flat_hash_map>
-#include "storage_hash_map.hpp"
+// #include <std::unordered_map>
+#include <unordered_map>
 
 #define CaLiG_Get_Time() std::chrono::high_resolution_clock::now()
 
@@ -27,7 +27,7 @@
 #define CaLiG_Print_Time_Micro(str, start) std::cout << str << std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::high_resolution_clock::now() - start).count() << " us" << std::endl
 
 
-// std::vector<ska::flat_hash_map<uint, bool>> d1;
+// std::vector<std::unordered_map<uint, bool>> d1;
 
 using namespace std;
 using u_set = unordered_set<uint>;
@@ -37,21 +37,21 @@ using vec = vector<uint>;
 struct vertex_Q{
     uint label;
     u_set nei;
-    ska::flat_hash_map<uint, vec> rep_nei;
+    std::unordered_map<uint, vec> rep_nei;
 };
 
 struct vertex_G{
     uint label;
     u_set nei;
-    ska::flat_hash_map<uint, ska::flat_hash_map<uint, u_set>> cand;
-    ska::flat_hash_map<uint, bool> LI;
+    std::unordered_map<uint, std::unordered_map<uint, u_set>> cand;
+    std::unordered_map<uint, bool> LI;
 };
 
 vector<vertex_Q> Q;
 vector<vertex_G> G;
 uint Q_size, G_size;
-vec update;
-ska::flat_hash_map<uint, vec> labels;
+vector<int> update;
+std::unordered_map<uint, vec> labels;
 
 bool isInVec(uint a, vec& v){
     for(uint i=0; i<v.size(); i++){
@@ -129,7 +129,7 @@ void inputQ(string& qp){
 
     for(uint ui=0; ui<Q_size; ui++){
         labels[Q[ui].label].emplace_back(ui);
-        ska::flat_hash_map<uint, vec> rep_nei;
+        std::unordered_map<uint, vec> rep_nei;
         for(auto& uni : Q[ui].nei){
             uint& uni_label = Q[uni].label;
             rep_nei[uni_label].emplace_back(uni);
@@ -145,12 +145,12 @@ void inputQ(string& qp){
 struct split{
     vec core;
     vector<u_set> core_nei;
-    ska::flat_hash_map<uint, u_set> c_s_nei;
+    std::unordered_map<uint, u_set> c_s_nei;
     vec shell;
     vector<u_set> shell_nei;
 };
 
-ska::flat_hash_map<uint, ska::flat_hash_map<uint, split>> matching_order;
+std::unordered_map<uint, std::unordered_map<uint, split>> matching_order;
 
 void insertNei(u_set &temp, uint i, uint ui, uint uj, split& uj_second){
     for(auto& nei : Q[i].nei){
@@ -176,7 +176,7 @@ bool neiAllCore(uint i, split& uj_second, uint ui, uint uj){
 // The matching order is stored in a hash map where the key is the vertex index
 void generateMO(){
     for(uint ui=0; ui<Q_size; ui++) {
-        ska::flat_hash_map<uint, split> ui_first;
+        std::unordered_map<uint, split> ui_first;
         for (auto &uj : Q[ui].nei) {
             if (uj >= 0) {
                 split uj_second;
@@ -339,7 +339,7 @@ void constructCand(){
         uint& lb = G[vi].label;
         if(lb!=-1){
             for(auto& ui: labels[lb]){
-                ska::flat_hash_map<uint, u_set> ui_cand;
+                std::unordered_map<uint, u_set> ui_cand;
                 for(auto& vj : G[vi].nei){
                     uint vj_lb = G[vj].label;
                     for(auto& uj : Q[ui].nei){
@@ -462,11 +462,11 @@ void deleteAndCheck2(uint u, uint v){
 
 
 void turnOff(uint& vi){
+    vec to_erase;
     for(auto& candi : G[vi].cand){
         auto& ui = candi.first;
         if(G[vi].label!=Q[ui].label) {
-            G[vi].cand.erase(ui);
-            G[vi].LI.erase(ui);
+            to_erase.push_back(ui);
             continue;
         }
         if(!G[vi].LI[ui]) continue;
@@ -475,17 +475,21 @@ void turnOff(uint& vi){
             deleteAndCheck(ui, vi);
         }
     }
+    for(auto ui : to_erase){
+        G[vi].cand.erase(ui);
+        G[vi].LI.erase(ui);
+    }
 }
 
 
 void turnOffProcess(uint v1, uint v2){
     G[v1].nei.erase(v2);
     G[v2].nei.erase(v1);
+    vec to_erase;
     for(auto& candi : G[v1].cand){
         uint ui = candi.first;
         if(G[v1].label!=Q[ui].label){
-            G[v1].cand.erase(ui);
-            G[v1].LI.erase(ui);
+            to_erase.push_back(ui);
             continue;
         }
         for(auto& ui_nei : candi.second){
@@ -495,6 +499,10 @@ void turnOffProcess(uint v1, uint v2){
                 G[v2].cand[uj][ui].erase(v1);
             }
         }
+    }
+    for(auto ui : to_erase){
+        G[v1].cand.erase(ui);
+        G[v1].LI.erase(ui);
     }
 
     turnOff(v1);
@@ -598,72 +606,58 @@ Propagation Handling: Comments explain how addAndCheck and deleteAndCheck manage
 // Function to handle the addition of an edge (v1, v2) in the data graph G
 // and update the CaLiG index's candidate sets and lighting states accordingly
 void turnOnProcess(uint& v1, uint& v2) {
-    // Temporary vectors to store affected vertex pairs during state propagation
     vec temp_v, temp_u;
 
-    // Step 1: Add the edge (v1, v2) to the data graph G by updating neighbor sets
-    G[v1].nei.insert(v2);  // Add v2 to v1's neighbors
-    G[v2].nei.insert(v1);  // Add v1 to v2's neighbors (undirected graph)
+    G[v1].nei.insert(v2);
+    G[v2].nei.insert(v1);
 
-    // Step 2: Iterate through v1's candidate set to update based on the new edge
+    vec to_erase;
     for (auto& candi : G[v1].cand) {
-        uint ui = candi.first;  // ui is a query vertex from Q that v1 might match
+        uint ui = candi.first;
 
-        // Check label compatibility: v1 must have the same label as ui to be a candidate
         if (G[v1].label != Q[ui].label) {
-            G[v1].cand.erase(ui);  // Remove ui from v1's candidate set if labels don't match
-            G[v1].LI.erase(ui);    // Remove ui's lighting state as it's no longer relevant
-            continue;              // Skip to the next candidate
+            to_erase.push_back(ui);
+            continue;
         }
 
-        // Step 3: Check ui's neighbors in the query graph Q
         for (auto& ui_nei : candi.second) {
-            uint uj = ui_nei.first;  // uj is a neighbor of ui in Q
+            uint uj = ui_nei.first;
 
-            // If v2's label matches uj's label, v2 could be a candidate for uj
             if (G[v2].label == Q[uj].label) {
-                // Update v1's candidate set: v2 is a potential match for uj given (ui, v1)
                 G[v1].cand[ui][uj].insert(v2);
 
-                // Case 1: If (ui, v1) is already "ON", propagate the update
                 if (G[v1].LI[ui]) {
-                    // Symmetrically update v2's candidate set: v1 is a candidate for ui
                     G[v2].cand[uj][ui].insert(v1);
-
-                    // Propagate "ON" state changes starting from (ui, v1)
                     addAndCheck(ui, v1, temp_v, temp_u);
-
-                    // Check affected pairs and turn off invalid states if necessary
                     for (uint i = 0; i < temp_v.size(); i++) {
-                        uint& v = temp_v[i];  // Data graph vertex
-                        uint& u = temp_u[i];  // Query graph vertex
-                        if (!G[v].LI[u]) {    // If (u, v) is not "ON"
-                            deleteAndCheck(u, v);  // Turn it "OFF" and propagate
+                        uint& v = temp_v[i];
+                        uint& u = temp_u[i];
+                        if (!G[v].LI[u]) {
+                            deleteAndCheck(u, v);
                         }
                     }
-                    temp_v.clear();  // Clear temporary storage
+                    temp_v.clear();
                     temp_u.clear();
                 }
-                // Case 2: If (ui, v1) is not "ON", check if it should be turned "ON"
                 else if (checkNei(v1, ui)) {
-                    G[v1].LI[ui] = true;  // Set (ui, v1) to "ON" state
-
-                    // Propagate "ON" state changes starting from (ui, v1)
+                    G[v1].LI[ui] = true;
                     addAndCheck(ui, v1, temp_v, temp_u);
-
-                    // Check affected pairs and turn off invalid states if necessary
                     for (uint i = 0; i < temp_v.size(); i++) {
-                        uint& v = temp_v[i];  // Data graph vertex
-                        uint& u = temp_u[i];  // Query graph vertex
-                        if (!G[v].LI[u]) {    // If (u, v) is not "ON"
-                            deleteAndCheck(u, v);  // Turn it "OFF" and propagate
+                        uint& v = temp_v[i];
+                        uint& u = temp_u[i];
+                        if (!G[v].LI[u]) {
+                            deleteAndCheck(u, v);
                         }
                     }
-                    temp_v.clear();  // Clear temporary storage
+                    temp_v.clear();
                     temp_u.clear();
                 }
             }
         }
+    }
+    for(auto ui : to_erase){
+        G[v1].cand.erase(ui);
+        G[v1].LI.erase(ui);
     }
 }
 
@@ -771,108 +765,34 @@ void turnOnProcess2(uint& v1, uint& v2){
 
 }
 
+// Read-only check: returns true if edge (v1,v2) insertion won't affect any candidates
 bool turnOnProcess_safe(uint v1, uint v2) {
-    // Temporary vectors to store affected vertex pairs during state propagation
-    // vec temp_v, temp_u;
-
-    // Step 1: Add the edge (v1, v2) to the data graph G by updating neighbor sets
-    G[v1].nei.insert(v2);  // Add v2 to v1's neighbors
-    G[v2].nei.insert(v1);  // Add v1 to v2's neighbors (undirected graph)
-
-    // Step 2: Iterate through v1's candidate set to update based on the new edge
     for (auto& candi : G[v1].cand) {
-        uint ui = candi.first;  // ui is a query vertex from Q that v1 might match
-
-        // // Check label compatibility: v1 must have the same label as ui to be a candidate
-        if (G[v1].label != Q[ui].label) {
-            // G[v1].cand.erase(ui);  // Remove ui from v1's candidate set if labels don't match
-            // G[v1].LI.erase(ui);    // Remove ui's lighting state as it's no longer relevant
-            continue;              // Skip to the next candidate
-        }
-
-        if(G[v1].label != Q[ui].label){continue; }
-        // Step 3: Check ui's neighbors in the query graph Q
+        uint ui = candi.first;
+        if (G[v1].label != Q[ui].label) continue;
         for (auto& ui_nei : candi.second) {
-            return false;
-
-        }
-    }
-
-    return true;
-}
-
-bool turnOffProcess_safe(uint v1, uint v2) {
-    // Temporary vectors to store affected vertex pairs during state propagation
-    // vec temp_v, temp_u;
-
-    // Step 1: Add the edge (v1, v2) to the data graph G by updating neighbor sets
-    G[v1].nei.insert(v2);  // Add v2 to v1's neighbors
-    G[v2].nei.insert(v1);  // Add v1 to v2's neighbors (undirected graph)
-
-    // Step 2: Iterate through v1's candidate set to update based on the new edge
-    for (auto& candi : G[v1].cand) {
-        uint ui = candi.first;  // ui is a query vertex from Q that v1 might match
-
-        // // Check label compatibility: v1 must have the same label as ui to be a candidate
-        if (G[v1].label != Q[ui].label) {
-            // G[v1].cand.erase(ui);  // Remove ui from v1's candidate set if labels don't match
-            // G[v1].LI.erase(ui);    // Remove ui's lighting state as it's no longer relevant
-            continue;              // Skip to the next candidate
-        }
-
-        if(G[v1].label != Q[ui].label){continue; }
-        // Step 3: Check ui's neighbors in the query graph Q
-        for (auto& ui_nei : candi.second) {
-            uint uj = ui_nei.first;  // uj is a neighbor of ui in Q
-
-            // If v2's label matches uj's label, v2 could be a candidate for uj
+            uint uj = ui_nei.first;
             if (G[v2].label == Q[uj].label) {
-                // // Update v1's candidate set: v2 is a potential match for uj given (ui, v1)
-                // G[v1].cand[ui][uj].insert(v2);
-
-                // // Case 1: If (ui, v1) is already "ON", propagate the update
-                // if (G[v1].LI[ui]) {
-                //     // Symmetrically update v2's candidate set: v1 is a candidate for ui
-                //     G[v2].cand[uj][ui].insert(v1);
-
-                //     // Propagate "ON" state changes starting from (ui, v1)
-                //     addAndCheck(ui, v1, temp_v, temp_u);
-
-                //     // Check affected pairs and turn off invalid states if necessary
-                //     for (uint i = 0; i < temp_v.size(); i++) {
-                //         uint& v = temp_v[i];  // Data graph vertex
-                //         uint& u = temp_u[i];  // Query graph vertex
-                //         if (!G[v].LI[u]) {    // If (u, v) is not "ON"
-                //             deleteAndCheck(u, v);  // Turn it "OFF" and propagate
-                //         }
-                //     }
-                //     temp_v.clear();  // Clear temporary storage
-                //     temp_u.clear();
-                // }
-                // // Case 2: If (ui, v1) is not "ON", check if it should be turned "ON"
-                // else if (checkNei(v1, ui)) {
-                //     G[v1].LI[ui] = true;  // Set (ui, v1) to "ON" state
-
-                //     // Propagate "ON" state changes starting from (ui, v1)
-                //     addAndCheck(ui, v1, temp_v, temp_u);
-
-                //     // Check affected pairs and turn off invalid states if necessary
-                //     for (uint i = 0; i < temp_v.size(); i++) {
-                //         uint& v = temp_v[i];  // Data graph vertex
-                //         uint& u = temp_u[i];  // Query graph vertex
-                //         if (!G[v].LI[u]) {    // If (u, v) is not "ON"
-                //             deleteAndCheck(u, v);  // Turn it "OFF" and propagate
-                //         }
-                //     }
-                //     temp_v.clear();  // Clear temporary storage
-                //     temp_u.clear();
-                // }
-                return false;
+                return false; // not safe, candidate update needed
             }
         }
     }
+    return true; // safe to skip
+}
 
-    return true;
+// Read-only check: returns true if edge (v1,v2) deletion won't affect any candidates
+bool turnOffProcess_safe(uint v1, uint v2) {
+    for (auto& candi : G[v1].cand) {
+        uint ui = candi.first;
+        if (G[v1].label != Q[ui].label) continue;
+        for (auto& ui_nei : candi.second) {
+            uint uj = ui_nei.first;
+            if (Q[uj].label == G[v2].label) {
+                return false; // not safe, candidate update needed
+            }
+        }
+    }
+    return true; // safe to skip
 }
 
 
@@ -974,7 +894,7 @@ void staticFilter(){
     //dumpG("./dump/G_static");
 }
 
-void dumpMatch(ska::flat_hash_map<uint, uint>& m){
+void dumpMatch(std::unordered_map<uint, uint>& m){
     cerr << "matching results is：" ;
     for(uint i=0; i<m.size(); i++){
         uint v = m[i];
@@ -983,7 +903,7 @@ void dumpMatch(ska::flat_hash_map<uint, uint>& m){
     cerr << endl;
 }
 
-bool shellCand(vector<u_set>& result, ska::flat_hash_map<uint, uint>& m, const vec& s, const vector<u_set>& s_n, vec& used){
+bool shellCand(vector<u_set>& result, std::unordered_map<uint, uint>& m, const vec& s, const vector<u_set>& s_n, vec& used){
     uint s_size = s.size();
     result.resize(s_size);
     for(uint i = 0; i<s_size; i++) {
@@ -1032,7 +952,7 @@ uint numAdd(uint th, const vector<u_set>& cand, u_set& used){
     return result;
 }
 
-bool notExit(uint shell, u_set nei, ska::flat_hash_map<uint, uint>& m){
+bool notExit(uint shell, u_set nei, std::unordered_map<uint, uint>& m){
     if(nei.size()==1){
         return false;
     }
@@ -1059,7 +979,7 @@ bool notExit(uint shell, u_set nei, ska::flat_hash_map<uint, uint>& m){
     return true;
 }
 
-uint searchCore(uint th, ska::flat_hash_map<uint, uint>& m, vec& used, const vec& c, const vector<u_set>& c_n, const vec& s, const vector<u_set>& s_n, ska::flat_hash_map<uint, u_set>& c2check){
+uint searchCore(uint th, std::unordered_map<uint, uint>& m, vec& used, const vec& c, const vector<u_set>& c_n, const vec& s, const vector<u_set>& s_n, std::unordered_map<uint, u_set>& c2check){
     uint result = 0;
     if(th == c.size()){
         vector<u_set> candidates;
@@ -1134,7 +1054,7 @@ uint searchMatch(uint v1, uint v2){
             for(auto& candi : G[v1].cand[u1]){
                 uint u2 = candi.first;
                 if(u2>=0 && candi.second.find(v2)!=candi.second.end()){
-                    ska::flat_hash_map<uint, uint> matching;
+                    std::unordered_map<uint, uint> matching;
                     matching[u1] = v1;
                     matching[u2] = v2;
                     vec core_v;
@@ -1179,7 +1099,7 @@ uint Parallel_Search(uint v1, uint v2){
         uint u2 = std::get<1>(tasks[i]);
         uint v2_val = std::get<2>(tasks[i]);
         
-        ska::flat_hash_map<uint, uint> matching;
+        std::unordered_map<uint, uint> matching;
         matching[u1] = v1;
         matching[u2] = v2;
         vec core_v;
@@ -1202,7 +1122,7 @@ void inputUpdate(string& path, uint max_num){
     update.clear();
     ifstream infile(path);
     char c;
-    uint v1, v2, w;
+    int v1, v2;
     uint cnt = 0;
     while (infile >> c >> v1 >> v2){
         if(max_num!=0 && ++cnt>max_num) break;
@@ -1214,53 +1134,56 @@ void inputUpdate(string& path, uint max_num){
 void updateAndMatching() {
     long long add_matches = 0;
     long long del_matches = 0;
-    double update_time = 0.0;
     double DCS_update_time = 0.0;
     double search_time = 0.0;
     
-    // OpenMP time
     double start_time, end_time;
 
     for (uint t = 0; t < update.size(); t += 2) {
-        uint v1 = update[t];
-        uint v2 = update[t + 1];
+        int v1 = update[t];
+        int v2 = update[t + 1];
 
         if(v1<0){
-            if(G[-v1-1].label==-1 || G[-v2-1].label==-1) continue;
-            if(!G[-v1-1].nei.count(-v2-1)) continue;
-            if(turnOffProcess_safe(-1-v1, -v2-1)){
+            uint dv1 = (uint)(-v1-1);
+            uint dv2 = (uint)(-v2-1);
+            if(G[dv1].label==(uint)-1 || G[dv2].label==(uint)-1) continue;
+            if(!G[dv1].nei.count(dv2)) continue;
+            if(turnOffProcess_safe(dv1, dv2)){
+                G[dv1].nei.erase(dv2);
+                G[dv2].nei.erase(dv1);
                 continue;
             }
     
-            // Auxiliary data structures update
             start_time = omp_get_wtime();
-            del_matches += searchMatch(-v1-1, -v2-1);
+            del_matches += searchMatch(dv1, dv2);
             end_time = omp_get_wtime();
-            search_time += (end_time - start_time) * 1000; // ms
+            search_time += (end_time - start_time) * 1000;
 
-            // FM
             start_time = omp_get_wtime();
-            turnOffProcess(-v1-1, -v2-1);
+            turnOffProcess(dv1, dv2);
             end_time = omp_get_wtime();
-            DCS_update_time += (end_time - start_time) * 1000; // ms
+            DCS_update_time += (end_time - start_time) * 1000;
         }
         else{
-            if(G[v1].label==-1 || G[v2].label==-1) continue;
-            if(G[v1].nei.count(v2)) continue;
-            if(turnOnProcess_safe(v1,v2)){
+            uint av1 = (uint)v1;
+            uint av2 = (uint)v2;
+            if(G[av1].label==(uint)-1 || G[av2].label==(uint)-1) continue;
+            if(G[av1].nei.count(av2)) continue;
+            if(turnOnProcess_safe(av1, av2)){
+                G[av1].nei.insert(av2);
+                G[av2].nei.insert(av1);
                 continue;
             }
-            // Auxiliary data structures update
-            start_time = omp_get_wtime();
-            turnOnProcess_safe_parallel(v1, v2);
-            end_time = omp_get_wtime();
-            DCS_update_time += (end_time - start_time) * 1000; // ms
 
-            // FM
             start_time = omp_get_wtime();
-            add_matches += searchMatch(v1, v2);
+            turnOnProcess(av1, av2);
             end_time = omp_get_wtime();
-            search_time += (end_time - start_time) * 1000; // ms
+            DCS_update_time += (end_time - start_time) * 1000;
+
+            start_time = omp_get_wtime();
+            add_matches += searchMatch(av1, av2);
+            end_time = omp_get_wtime();
+            search_time += (end_time - start_time) * 1000;
         }
     }
 
@@ -1275,66 +1198,66 @@ void updateAndMatching() {
 void Parallel_batch_updateAndMatchingSingle() {
     long long add_matches = 0;
     long long del_matches = 0;
-    double update_time = 0.0;
-    double DCS_update_time = 0;
+    double DCS_update_time = 0.0;
     double search_time = 0.0;
     
-    // OpenMP
     double start_time, end_time;
 
-    size_t window_size = 16;
-
     for (uint t = 0; t < update.size(); t += 2) {
-        uint v1 = update[t];
-        uint v2 = update[t + 1];
+        int v1 = update[t];
+        int v2 = update[t + 1];
 
         if(v1<0){
-            if(G[-v1-1].label==-1 || G[-v2-1].label==-1) continue;
-            if(!G[-v1-1].nei.count(-v2-1)) continue;
-            if(turnOffProcess_safe(-1-v1, -v2-1)){
+            uint dv1 = (uint)(-v1-1);
+            uint dv2 = (uint)(-v2-1);
+            if(G[dv1].label==(uint)-1 || G[dv2].label==(uint)-1) continue;
+            if(!G[dv1].nei.count(dv2)) continue;
+            if(turnOffProcess_safe(dv1, dv2)){
+                G[dv1].nei.erase(dv2);
+                G[dv2].nei.erase(dv1);
                 continue;
             }
     
-            // FM
+            // Search (before candidate update for deletion)
             start_time = omp_get_wtime();
-            del_matches += Parallel_Search(-v1-1, -v2-1);
-            // del_matches += searchMatch(-v1-1, -v2-1);
+            del_matches += Parallel_Search(dv1, dv2);
             end_time = omp_get_wtime();
-            search_time += (end_time - start_time) * 1000; // ms
+            search_time += (end_time - start_time) * 1000;
 
-            // Auxiliary data structures update   
+            // Candidate update (serial — cascading dependencies)
             start_time = omp_get_wtime();
-            turnOffProcess(-v1-1, -v2-1);
+            turnOffProcess(dv1, dv2);
             end_time = omp_get_wtime();
-            DCS_update_time += (end_time - start_time) * 1000; // ms
+            DCS_update_time += (end_time - start_time) * 1000;
         }
         else{
-            // bool is_safe = false;
-            if(G[v1].label==-1 || G[v2].label==-1) continue;
-            if(G[v1].nei.count(v2)) continue;
-            if(turnOnProcess_safe(v1,v2)){
+            uint av1 = (uint)v1;
+            uint av2 = (uint)v2;
+            if(G[av1].label==(uint)-1 || G[av2].label==(uint)-1) continue;
+            if(G[av1].nei.count(av2)) continue;
+            if(turnOnProcess_safe(av1, av2)){
+                G[av1].nei.insert(av2);
+                G[av2].nei.insert(av1);
                 continue;
             }
-            // Auxiliary data structures update
-            start_time = omp_get_wtime();
-            // turnOnProcess(v1, v2);
-            turnOnProcess_safe_parallel(v1, v2);
-            end_time = omp_get_wtime();
-            DCS_update_time += (end_time - start_time) * 1000; //ms
 
-            // FM
+            // Candidate update (serial — cascading dependencies)
             start_time = omp_get_wtime();
-            add_matches += Parallel_Search(v1, v2);
-            // add_matches += searchMatch(v1, v2);
+            turnOnProcess(av1, av2);
             end_time = omp_get_wtime();
-            search_time += (end_time - start_time) * 1000; //ms
+            DCS_update_time += (end_time - start_time) * 1000;
+
+            // Search (after candidate update for insertion)
+            start_time = omp_get_wtime();
+            add_matches += Parallel_Search(av1, av2);
+            end_time = omp_get_wtime();
+            search_time += (end_time - start_time) * 1000;
         }
     }
     cerr << "added matches: " << add_matches << endl;
     cerr << "deleted matches: " << del_matches << endl;
     cerr << "Auxiliary Data Structure update time: " << DCS_update_time << "ms" << endl;
     cerr << "updated matches: " << add_matches + del_matches << endl;
-    // cerr << "update time: " << update_time << "ms" << endl;
     cerr << "search time: " << search_time << "ms" << endl;
 }
 
