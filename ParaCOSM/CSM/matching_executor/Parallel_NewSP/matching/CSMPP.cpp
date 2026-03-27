@@ -297,13 +297,22 @@ void CSMPP::Safe_Update_remove(uint v1, uint v2){
 void CSMPP::AddVertex(uint id, uint label)
 {
     data_.AddVertex(id, label);
-    
+
+    // Ensure index covers the new vertex
+    if(id >= data_.index.size()){
+        size_t old_sz = data_.index.size();
+        uint arr_sz = data_.NumVLabels() + data_.NumELabels();
+        data_.index.resize(id + 1, nullptr);
+        for(size_t k = old_sz; k <= id; k++){
+            data_.index[k] = new int[arr_sz]{0};
+        }
+    }
+
     visited_.resize(id + 1, false);
 
     for(int i =0; i < Thread_MAX; i++){
         visited_parallel[i].resize(id + 1, false);
     }
-    // visited_parallel
 }
 
 void CSMPP::RemoveVertex(uint id)

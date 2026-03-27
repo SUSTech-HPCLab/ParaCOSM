@@ -8,6 +8,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <omp.h>
 #include "graph.h"
 /**
  * @description: add vertex for graph
@@ -508,6 +509,110 @@ void Graph::indexUpdate(uint v1, uint v2, uint label, bool op){
         this->index[v2][v1Label]--;
         this->index[v2][Label]--;
     }
+}
+
+void Graph::atomicIndexUpdate(uint v1, uint v2, uint label, bool op){
+    uint v1Label = this->GetVertexLabel(v1);
+    uint v2Label = this->GetVertexLabel(v2);
+    uint Label = this->NumVLabels() + label;
+    if(op){
+        #pragma omp atomic
+        this->index[v1][v2Label]++;
+        #pragma omp atomic
+        this->index[v1][Label]++;
+        #pragma omp atomic
+        this->index[v2][v1Label]++;
+        #pragma omp atomic
+        this->index[v2][Label]++;
+    }
+    else{
+        #pragma omp atomic
+        this->index[v1][v2Label]--;
+        #pragma omp atomic
+        this->index[v1][Label]--;
+        #pragma omp atomic
+        this->index[v2][v1Label]--;
+        #pragma omp atomic
+        this->index[v2][Label]--;
+    }
+}
+
+void Graph::BatchAddEdges(const std::vector<std::tuple<uint, uint, uint>>& edges, size_t num_threads){
+    if(edges.empty()) return;
+
+    const size_t nv = vlabels_.size();
+
+    // Update elabel_count_
+    for(const auto& [v1, v2, label] : edges){
+        elabel_count_ = std::max(elabel_count_, label + 1);
+    }
+
+    // Step 1: Group edges by vertex (serial O(N) scan)
+    std::vector<std::vector<std::pair<uint, uint>>> per_vertex(nv);
+    for(const auto& [v1, v2, label] : edges){
+        per_vertex[v1].emplace_back(v2, label);
+        per_vertex[v2].emplace_back(v1, label);
+    }
+
+    // Step 2: Sort + dedup + merge per vertex (parallel across vertices)
+    const int nv_int = static_cast<int>(nv);
+    #pragma omp parallel for schedule(dynamic, 64) num_threads(num_threads)
+    for(int vi = 0; vi < nv_int; vi++){
+        size_t v = static_cast<size_t>(vi);
+        auto& new_entries = per_vertex[v];
+        if(new_entries.empty()) continue;
+
+        // Sort by neighbor id
+        std::sort(new_entries.begin(), new_entries.end());
+        // Dedup by neighbor id
+        auto last = std::unique(new_entries.begin(), new_entries.end(),
+            [](const std::pair<uint,uint>& a, const std::pair<uint,uint>& b){
+                return a.first == b.first;
+            });
+        new_entries.erase(last, new_entries.end());
+
+        auto& old_nbrs = neighbors_[v];
+        auto& old_elabs = elabels_[v];
+
+        // Sorted merge: old U new -> merged
+        std::vector<uint> m_nbrs;
+        std::vector<uint> m_labs;
+        m_nbrs.reserve(old_nbrs.size() + new_entries.size());
+        m_labs.reserve(old_elabs.size() + new_entries.size());
+
+        size_t i = 0, j = 0;
+        while(i < old_nbrs.size() && j < new_entries.size()){
+            if(old_nbrs[i] < new_entries[j].first){
+                m_nbrs.push_back(old_nbrs[i]);
+                m_labs.push_back(old_elabs[i]);
+                i++;
+            } else if(old_nbrs[i] > new_entries[j].first){
+                m_nbrs.push_back(new_entries[j].first);
+                m_labs.push_back(new_entries[j].second);
+                j++;
+            } else {
+                // Duplicate -- keep existing edge
+                m_nbrs.push_back(old_nbrs[i]);
+                m_labs.push_back(old_elabs[i]);
+                i++; j++;
+            }
+        }
+        while(i < old_nbrs.size()){
+            m_nbrs.push_back(old_nbrs[i]);
+            m_labs.push_back(old_elabs[i]);
+            i++;
+        }
+        while(j < new_entries.size()){
+            m_nbrs.push_back(new_entries[j].first);
+            m_labs.push_back(new_entries[j].second);
+            j++;
+        }
+
+        old_nbrs = std::move(m_nbrs);
+        old_elabs = std::move(m_labs);
+    }
+
+    edge_count_ += edges.size();
 }
 
 Edge Graph::GetEdge(uint index){

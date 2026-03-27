@@ -125,6 +125,8 @@ public:
     void RemoveVertex(uint id);
     void AddEdge(uint v1, uint v2, uint label);
     void RemoveEdge(uint v1, uint v2);
+    void atomicIndexUpdate(uint v1, uint v2, uint label, bool op);
+    void BatchAddEdges(const std::vector<std::tuple<uint, uint, uint>>& edges, size_t num_threads);
 
     uint GetVertexLabel(uint u) const;
     const std::vector<uint>& GetNeighbors(uint v) const;

@@ -118,11 +118,12 @@ int main(int argc, char *argv[])
     auto IncrementalFun = [&data_graph, &mm, &num_v_updates, &num_e_updates, &start, &update_mode, &thread_num]()
     {
         if (update_mode == "batch_all") {
-            // ---- batch_all mode: pre-classify, batch add, parallel enumerate ----
+            // ---- batch_all mode: phased parallel (C+D strategy) ----
+            // Phase 0: Scan stream -- vertex ops + edge removes immediate,
+            //          edge inserts deferred for batch processing.
             struct UEdge { uint v1, v2, label; };
-            std::vector<UEdge> unsafe_edges;
+            std::vector<UEdge> edge_inserts;
 
-            // Phase 1: process all updates serially (vertex + safe_update + classify)
             while (!data_graph.updates_.empty()) {
                 const InsertUnit& u = data_graph.updates_.front();
                 if (u.type == 'v' && u.is_add) {
@@ -132,10 +133,7 @@ int main(int argc, char *argv[])
                     mm->RemoveVertex(u.id1);
                     num_v_updates++;
                 } else if (u.type == 'e' && u.is_add) {
-                    mm->Safe_Update(u.id1, u.id2, u.label);
-                    if (!mm->safe_detect(u.id1, u.id2, u.label, pos)) {
-                        unsafe_edges.push_back({u.id1, u.id2, u.label});
-                    }
+                    edge_inserts.push_back({u.id1, u.id2, u.label});
                     num_e_updates++;
                 } else if (u.type == 'e' && !u.is_add) {
                     if (!mm->safe_detect(u.id1, u.id2, u.label, neg)) {
@@ -148,15 +146,51 @@ int main(int argc, char *argv[])
                 if (reach_time_limit) break;
             }
 
-            std::cout << "[batch_all] total e_updates: " << num_e_updates
-                      << "  unsafe edges: " << unsafe_edges.size() << std::endl;
+            const size_t n_inserts = edge_inserts.size();
+            const size_t nthreads = std::min<size_t>(thread_num,
+                                        std::max<size_t>(n_inserts, 1));
 
-            // Phase 2: parallel enumerate unsafe edges
+            // Phase 1: Parallel indexUpdate (atomic, commutative)
+            #pragma omp parallel for schedule(static) num_threads(nthreads)
+            for (size_t i = 0; i < n_inserts; i++) {
+                data_graph.atomicIndexUpdate(
+                    edge_inserts[i].v1, edge_inserts[i].v2,
+                    edge_inserts[i].label, true);
+            }
+
+            // Phase 2: Parallel safe_detect (read-only on updated index)
+            std::vector<int> is_unsafe(n_inserts, 0);
+            #pragma omp parallel for schedule(static) num_threads(nthreads)
+            for (size_t i = 0; i < n_inserts; i++) {
+                if (!mm->safe_detect(edge_inserts[i].v1, edge_inserts[i].v2,
+                                     edge_inserts[i].label, pos)) {
+                    is_unsafe[i] = 1;
+                }
+            }
+            std::vector<UEdge> unsafe_edges;
+            for (size_t i = 0; i < n_inserts; i++) {
+                if (is_unsafe[i]) unsafe_edges.push_back(edge_inserts[i]);
+            }
+
+            // Phase 3: Batch AddEdge (parallel per-vertex sorted merge)
+            {
+                std::vector<std::tuple<uint, uint, uint>> edges_tuple;
+                edges_tuple.reserve(n_inserts);
+                for (const auto& e : edge_inserts)
+                    edges_tuple.emplace_back(e.v1, e.v2, e.label);
+                data_graph.BatchAddEdges(edges_tuple, nthreads);
+            }
+
+            std::cout << "[batch_all] edge inserts: " << n_inserts
+                      << "  unsafe: " << unsafe_edges.size() << std::endl;
+
+            // Phase 4: Parallel enumerate unsafe edges
             const size_t n_unsafe = unsafe_edges.size();
-            const size_t nthreads = std::min<size_t>(thread_num, std::max<size_t>(n_unsafe, 1));
-            std::vector<size_t> thread_results(nthreads + 1, 0);
+            const size_t enum_threads = std::min<size_t>(thread_num,
+                                            std::max<size_t>(n_unsafe, 1));
+            std::vector<size_t> thread_results(enum_threads + 1, 0);
 
-            #pragma omp parallel num_threads(nthreads)
+            #pragma omp parallel num_threads(enum_threads)
             {
                 size_t tid = omp_get_thread_num();
                 #pragma omp for schedule(dynamic, 1)
@@ -169,7 +203,7 @@ int main(int argc, char *argv[])
             }
 
             size_t total_positive = 0;
-            for (size_t t = 0; t <= nthreads; t++) total_positive += thread_results[t];
+            for (size_t t = 0; t <= enum_threads; t++) total_positive += thread_results[t];
             mm->AddPositiveResults(total_positive);
             return;
         }
