@@ -1318,6 +1318,31 @@ void Parallel_Graphflow::Parallel_FindMatches2(uint order_index, uint depth, std
         m[u] = UNMATCHED;
     }
 
+    // Adaptive: skip parallel when too few tasks — sequential is faster.
+    // Analysis: 50-72% of PFM2 calls have vv<=10 but contribute <6% of tasks.
+    // Dense queries (many edges) have more PFM2 calls with less work each,
+    // making OMP overhead dominate. Use higher threshold for denser queries.
+    const size_t VV_SEQ_THRESHOLD = NUMTHREAD * std::max<size_t>(2,
+        query_.NumEdges() / 3);
+    if (vertex_vector.size() <= VV_SEQ_THRESHOLD) {
+        // Process sequentially: avoid omp overhead entirely
+        for (size_t t_1 = 0; t_1 < vertex_vector.size(); t_1++) {
+            auto& [v3, u_min3, u_min_label3, m2, i2] = vertex_vector[t_1];
+            uint u2 = order_vs_[order_index][depth+1];
+            local_vec_visited_local[0][v3] = true;
+            m2[u2] = v3;
+            ProcessNeighbor(u2, u_min3, u_min_label3,
+                order_index, depth+1, m2,
+                local_num_result[0], i2, 0);
+            local_vec_visited_local[0][v3] = false;
+            m2[u2] = UNMATCHED;
+        }
+        for (size_t i = 0; i < local_num_result.size(); ++i) {
+            num_results += local_num_result[i];
+        }
+        return;
+    }
+
     // if(auto_tuning == 1){
         if(vertex_vector.size() < NUMT){
             if(vertex_vector.size() == 0){
