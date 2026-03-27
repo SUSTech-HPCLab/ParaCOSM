@@ -239,6 +239,39 @@ void CSMPP::Safe_Update(uint v1, uint v2, uint label){
     this->data_.indexUpdate(v1, v2, label, true);
 }
 
+// ---------------------------------------------------------------------------
+// batch_all support
+// ---------------------------------------------------------------------------
+
+void CSMPP::UpdateIndexForEdge(uint v1, uint v2, uint label)
+{
+    // Same as Safe_Update but edge already added to data graph by caller
+    this->data_.indexUpdate(v1, v2, label, true);
+}
+
+size_t CSMPP::EnumerateNewEdge(uint v1, uint v2, uint label, size_t /*thread_id*/)
+{
+    // Create an isolated worker to avoid any shared state issues.
+    // searchInit() already creates sub-workers internally for multi-query
+    // parallelism, so we disable nested OMP here and run serially per-edge.
+    CSMPP worker(
+        this->data_,
+        this->query_,
+        this->queryVec,
+        static_cast<uint>(this->max_num_results_),
+        this->print_preprocessing_results_,
+        this->print_enumeration_results_,
+        this->homomorphism_,
+        this->print_init
+    );
+    worker.updateEdgeFindQuery = this->updateEdgeFindQuery;
+    worker.initEdgeFindQuery = this->initEdgeFindQuery;
+
+    worker.searchInit(v1, v2, label, pos);
+
+    return worker.num_positive_results_;
+}
+
 
 /**
  * @description: after a edge remove, begin search subgraph and update graph

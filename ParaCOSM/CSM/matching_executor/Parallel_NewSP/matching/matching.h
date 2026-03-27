@@ -64,6 +64,12 @@ public:
     
     virtual void GetMemoryCost(size_t &num_edges, size_t &num_vertices);
     void TimePrint(bool motif);
+
+    virtual size_t EnumerateNewEdge(uint v1, uint v2, uint label, size_t thread_id) { return 0; }
+    virtual void PrepareBatchEnumeration(size_t /*num_threads*/) {}
+    virtual void UpdateIndexForEdge(uint v1, uint v2, uint label) {}
+    void AddPositiveResults(size_t delta) { num_positive_results_ += delta; }
+
     // get execution info
     void GetNumInitialResults(size_t &num_initial_results);
     void GetNumPositiveResults(size_t &num_positive_results);

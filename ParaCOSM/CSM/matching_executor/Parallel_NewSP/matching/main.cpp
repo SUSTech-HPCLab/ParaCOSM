@@ -3,6 +3,7 @@
 #include <numeric>
 #include <string>
 #include <thread>
+#include <omp.h>
 
 // Prefer local Parallel_NewSP headers when building inside subproject;
 // fallback to prefixed includes when building from the top-level CSM tree.
@@ -49,6 +50,10 @@ int main(int argc, char *argv[])
     app.add_option("--homo", homo, "using graph homomorphism");
     app.add_option("--report-initial", report_initial, "report the result of initial matching or not");
     app.add_option("--initial-time-limit", initial_time_limit, "time limit for the initial matching (second)");
+    std::string update_mode = "default";
+    size_t thread_num = 8;
+    app.add_option("-m,--update-mode", update_mode, "Update mode: default | batch_all");
+    app.add_option("-t,--thread-num", thread_num, "Number of threads");
     CLI11_PARSE(app, argc, argv);
     
     std::chrono::high_resolution_clock::time_point start, lstart;
@@ -110,8 +115,66 @@ int main(int argc, char *argv[])
     
     start = MY_Get_Time();
 
-    auto IncrementalFun = [&data_graph, &mm, &num_v_updates, &num_e_updates, &start]()
+    auto IncrementalFun = [&data_graph, &mm, &num_v_updates, &num_e_updates, &start, &update_mode, &thread_num]()
     {
+        if (update_mode == "batch_all") {
+            // ---- batch_all mode: pre-classify, batch add, parallel enumerate ----
+            struct UEdge { uint v1, v2, label; };
+            std::vector<UEdge> unsafe_edges;
+
+            // Phase 1: process all updates serially (vertex + safe_update + classify)
+            while (!data_graph.updates_.empty()) {
+                const InsertUnit& u = data_graph.updates_.front();
+                if (u.type == 'v' && u.is_add) {
+                    mm->AddVertex(u.id1, u.label);
+                    num_v_updates++;
+                } else if (u.type == 'v' && !u.is_add) {
+                    mm->RemoveVertex(u.id1);
+                    num_v_updates++;
+                } else if (u.type == 'e' && u.is_add) {
+                    mm->Safe_Update(u.id1, u.id2, u.label);
+                    if (!mm->safe_detect(u.id1, u.id2, u.label, pos)) {
+                        unsafe_edges.push_back({u.id1, u.id2, u.label});
+                    }
+                    num_e_updates++;
+                } else if (u.type == 'e' && !u.is_add) {
+                    if (!mm->safe_detect(u.id1, u.id2, u.label, neg)) {
+                        mm->RemoveEdge(u.id1, u.id2);
+                    }
+                    mm->Safe_Update_remove(u.id1, u.id2);
+                    num_e_updates++;
+                }
+                data_graph.updates_.pop();
+                if (reach_time_limit) break;
+            }
+
+            std::cout << "[batch_all] total e_updates: " << num_e_updates
+                      << "  unsafe edges: " << unsafe_edges.size() << std::endl;
+
+            // Phase 2: parallel enumerate unsafe edges
+            const size_t n_unsafe = unsafe_edges.size();
+            const size_t nthreads = std::min<size_t>(thread_num, std::max<size_t>(n_unsafe, 1));
+            std::vector<size_t> thread_results(nthreads + 1, 0);
+
+            #pragma omp parallel num_threads(nthreads)
+            {
+                size_t tid = omp_get_thread_num();
+                #pragma omp for schedule(dynamic, 1)
+                for (size_t k = 0; k < n_unsafe; k++) {
+                    if (reach_time_limit) continue;
+                    const auto& e = unsafe_edges[k];
+                    size_t r = mm->EnumerateNewEdge(e.v1, e.v2, e.label, tid);
+                    thread_results[tid] += r;
+                }
+            }
+
+            size_t total_positive = 0;
+            for (size_t t = 0; t <= nthreads; t++) total_positive += thread_results[t];
+            mm->AddPositiveResults(total_positive);
+            return;
+        }
+
+        // ---- default mode: serial update loop ----
         while (!data_graph.updates_.empty())
         {
             const InsertUnit & insert = data_graph.updates_.front();
