@@ -1102,3 +1102,123 @@ void InterExecutor::BatchUpdates_Persistent(
     classify_epoch.fetch_add(1, std::memory_order_release);
     for (auto& t : classify_pool) t.join();
 }
+
+// ===========================================================================
+// BatchUpdates_AllAtOnce
+//
+// Strategy: pre-classify ALL updates, add ALL unsafe edges to graph, then
+// enumerate matches for ALL unsafe edges in parallel (inter-update parallelism).
+// ===========================================================================
+
+void InterExecutor::BatchUpdates_AllAtOnce(
+    size_t& num_v_updates,
+    size_t& num_e_updates,
+    size_t& unsafe_updates,
+    size_t& count,
+    size_t& positive_num_results_last,
+    size_t& negative_num_results_last,
+    std::atomic_bool& reach_time_limit,
+    size_t num_threads
+) {
+    const size_t update_size = data_graph_.updates_vec_.size();
+    if (update_size == 0) return;
+
+    // ---- Phase 1: Apply vertex updates & classify edge updates ----
+    // Vertex updates must be applied in order (they change vertex labels that
+    // Classify depends on). Edge classification is read-only w.r.t. vertex
+    // labels and can be parallelised.
+
+    struct UnsafeEdge {
+        uint v1, v2, label;
+    };
+
+    std::vector<uint8_t> update_type(update_size, 0); // 0=safe-edge, 1=unsafe-edge, 2=vertex
+    // First pass (serial): apply vertex updates
+    for (size_t i = 0; i < update_size; i++) {
+        const auto& u = data_graph_.updates_vec_[i];
+        if (u.type == 'v') {
+            update_type[i] = 2;
+            if (u.is_add) {
+                matching_instance_->AddVertex(u.id1, u.label);
+            }
+            num_v_updates++;
+        }
+    }
+
+    // Second pass (parallel): classify edge updates
+    #pragma omp parallel for num_threads(num_threads) schedule(static, 512)
+    for (size_t i = 0; i < update_size; i++) {
+        if (update_type[i] != 0) continue; // already handled (vertex)
+        const auto& u = data_graph_.updates_vec_[i];
+        if (u.type != 'e' || !u.is_add) {
+            update_type[i] = 2; // edge deletion or other → treat as vertex-like
+            continue;
+        }
+        bool safe = matching_instance_->Classify(u.id1, u.id2, u.label);
+        update_type[i] = safe ? 0 : 1;
+    }
+
+    // Collect unsafe edges (preserve order)
+    std::vector<UnsafeEdge> unsafe_edges;
+    unsafe_edges.reserve(update_size / 10); // heuristic
+    for (size_t i = 0; i < update_size; i++) {
+        const auto& u = data_graph_.updates_vec_[i];
+        if (update_type[i] == 1) {
+            unsafe_edges.push_back({u.id1, u.id2, u.label});
+        }
+        if (u.type == 'e') num_e_updates++;
+    }
+
+    std::cout << "[batch_all] total updates: " << update_size
+              << "  unsafe edges: " << unsafe_edges.size()
+              << "  (safe skipped: " << (update_size - unsafe_edges.size() - num_v_updates)
+              << ")" << std::endl;
+
+    // ---- Phase 2: Add ALL unsafe edges to data graph (serial, fast) ----
+    for (const auto& e : unsafe_edges) {
+        data_graph_.AddEdge(e.v1, e.v2, e.label);
+    }
+
+    // ---- Phase 3: Prepare per-thread state for parallel enumeration ----
+    matching_instance_->PrepareBatchEnumeration(num_threads);
+
+    // ---- Phase 4: Enumerate matches in parallel across unsafe edges ----
+    const size_t n_unsafe = unsafe_edges.size();
+    std::vector<size_t> thread_results(num_threads, 0);
+
+    #pragma omp parallel num_threads(num_threads)
+    {
+        size_t tid = omp_get_thread_num();
+        #pragma omp for schedule(dynamic, 1)
+        for (size_t k = 0; k < n_unsafe; k++) {
+            if (reach_time_limit) continue;
+            const auto& e = unsafe_edges[k];
+            size_t r = matching_instance_->EnumerateNewEdge(e.v1, e.v2, e.label, tid);
+            thread_results[tid] += r;
+        }
+    }
+
+    // ---- Phase 5: Aggregate results ----
+    size_t total_positive = 0;
+    for (size_t t = 0; t < num_threads; t++) {
+        total_positive += thread_results[t];
+    }
+
+    // Bump the matching instance's positive result counter
+    matching_instance_->AddPositiveResults(total_positive);
+
+    size_t pos_cur = 0, neg_cur = 0;
+    matching_instance_->GetNumPositiveResults(pos_cur);
+    matching_instance_->GetNumNegativeResults(neg_cur);
+    positive_num_results_last = pos_cur;
+    negative_num_results_last = neg_cur;
+    unsafe_updates = unsafe_edges.size();
+
+    // Handle vertex removals (deferred — must be in order after everything)
+    for (size_t i = 0; i < update_size; i++) {
+        const auto& u = data_graph_.updates_vec_[i];
+        if (u.type == 'v' && !u.is_add) {
+            matching_instance_->RemoveVertex(u.id1);
+        }
+    }
+}

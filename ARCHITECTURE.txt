@@ -1,0 +1,248 @@
+================================================================================
+PARALLEL GRAPHFLOW ARCHITECTURE DIAGRAM
+================================================================================
+
+CALL CHAIN FOR EDGE UPDATES:
+
+main.cpp
+  │
+  └─ RunUpdates_InterExecutor()
+       │
+       └─ InterExecutor::BatchUpdates3() / BatchUpdates_OpenMP()
+            │
+            ├─ for (each update in batch)
+            │
+            ├─ Classify(v1, v2, label)  [Line 2595]
+            │  └─ Returns: is_safe (true if edge matches query)
+            │
+            ├─ IF UNSAFE:
+            │  │
+            │  └─ AddEdge(v1, v2, label)  [Line 2663]
+            │      │
+            │      ├─ data_.AddEdge(v1, v2, label)  [Line 2665]
+            │      │
+            │      └─ for (i = 0; i < query_.NumEdges(); i++)  [Line 2672]
+            │          │
+            │          ├─ IF edge matches query_edge[i] direction 1:
+            │          │  │
+            │          │  ├─ Set m[u1] = v1, m[u2] = v2
+            │          │  ├─ Mark visited_[v1], visited_[v2]
+            │          │  │
+            │          │  └─ taskflow_findmatches_layer(i, 2, m)  [Line 2694]
+            │          │      │
+            │          │      └─ Parallel_FindMatches2(i, 2, m, num_results)
+            │          │          [Line 563]
+            │          │
+            │          └─ IF edge matches query_edge[i] direction 2:
+            │             (same as above with v1↔v2)
+            │
+            └─ num_positive_results_ += num_results  [Line 2742]
+
+
+================================================================================
+PARALLEL_FINDMATCHES2 INTERNAL FLOW:
+================================================================================
+
+Parallel_FindMatches2(order_index, depth=2, m, num_results)  [Line 1185]
+│
+├─ [SETUP]
+│  ├─ vertex_vector.clear()  [Line 1199]
+│  ├─ job_queue.clear()      [Line 1200]
+│  └─ std::vector<size_t> local_num_result(NUMT+2, 0)  [Line 1188]
+│
+├─ [LAYER 1: Find candidates at depth 1→2]
+│  │
+│  ├─ uint u = order_vs_[order_index][depth]  [Line 1190]
+│  ├─ Find u_min (neighbor with smallest adjacency)  [Lines 1195-1216]
+│  │
+│  └─ for (uint i=0; i < u_min_nbrs.size(); i++)  [Line 1221]
+│      │
+│      └─ For each candidate v at depth:
+│          │
+│          ├─ Validate: labels match  [Lines 1225-1229]
+│          ├─ Validate: joinable with existing matches  [Lines 1231-1250]
+│          ├─ Validate: not visited (if isomorphism)  [Lines 1253-1254]
+│          │
+│          ├─ IF complete match (depth == NumVertices-1):
+│          │  └─ num_results++  [Line 1265]
+│          │
+│          └─ ELSE (partial match):
+│             │
+│             ├─ Mark v as visited  [Lines 1257-1261]
+│             │
+│             ├─ [INLINE LAYER 2 EXPANSION: depth 2→3]
+│             │  │
+│             │  ├─ Find u_min2 for depth+1  [Lines 1270-1294]
+│             │  │
+│             │  └─ for (uint i2=0; i2 < u_min_nbrs2.size(); i2++)
+│             │      └─ Collect valid candidates in vertex_vector
+│             │         vertex_vector.emplace_back(v, u_min2, u_min_label2, m, i2)
+│             │
+│             └─ Unmark v  [Lines 1314-1318]
+│
+├─ [AUTO-TUNING]
+│  │
+│  └─ if (vertex_vector.size() < NUMT)  [Line 1322]
+│      └─ NUMT = vertex_vector.size()
+│
+└─ [PARALLEL EXECUTION]
+   │
+   ├─ #pragma omp parallel for num_threads(NUMT) schedule(dynamic, 1)
+   │  [Line 1339]
+   │
+   └─ for (size_t t_1 = 0; t_1 < vertex_vector.size(); t_1++)
+      │
+      └─ For each entry in vertex_vector:
+         │
+         ├─ auto& [v3, u_min3, u_min_label3, m2, i2] = vertex_vector[t_1]
+         │
+         ├─ uint u2 = order_vs_[order_index][depth+1]  [Line 1348]
+         │
+         ├─ local_vec_visited_local[thread_id][v3] = true  [Line 1351]
+         ├─ m2[u2] = v3  [Line 1353]
+         │
+         ├─ ProcessNeighbor(u2, u_min3, u_min_label3,  [Line 1356]
+         │  order_index, depth+1, m2, num_results, i2, thread_id)
+         │  │
+         │  └─ ProcessNeighbor() [Line 1435]:
+         │     │
+         │     ├─ Validate candidate (labels, joinable, visited)
+         │     │
+         │     ├─ IF complete: num_results++
+         │     │
+         │     └─ ELSE: FindMatches_local(order_index, depth+2, ...)
+         │            [Line 1497]
+         │            │
+         │            └─ RECURSIVE: Continues depth+2 → N
+         │               Each recursion:
+         │               • Finds u_min
+         │               • Iterates u_min neighbors
+         │               • For each valid candidate:
+         │                 - Recurse to depth+1
+         │                 - OR increment num_results if complete
+         │
+         ├─ local_vec_visited_local[thread_id][v3] = false
+         ├─ m2[u2] = UNMATCHED
+         │
+         └─ [WORK STEALING - optional]
+            └─ If job_queue not empty:
+               └─ Pop and process from queue
+                  (This is for load balancing)
+   
+   └─ Accumulate results:
+      for (size_t i = 0; i < local_num_result.size(); i++)
+         num_results += local_num_result[i]  [Line 1394]
+
+
+================================================================================
+THREAD EXECUTION TIMELINE (8 threads):
+================================================================================
+
+Time →
+
+Initial Matching Phase (sequential):
+  main → InitialMatching() → [single thread] → FindMatches(0, 1, m)
+
+Update Processing Phase (persistent parallel):
+  main → PersistentParallelUpdate()
+    │
+    └─ #pragma omp parallel num_threads(8)  [ONE FORK]
+       │
+       ├─ Thread 0-7 (all participate)
+       │
+       ├─ [While loop: sliding_window_base < update_size]
+       │  │
+       │  ├─ #pragma omp single         [Only T0]
+       │  │  └─ Apply vertex adds
+       │  │     (implicit barrier after)
+       │  │
+       │  ├─ #pragma omp for            [T0-T7 parallel]
+       │  │  └─ Classify edges
+       │  │     (implicit barrier after)
+       │  │
+       │  ├─ #pragma omp single         [Only T0]
+       │  │  └─ Find first unsafe
+       │  │     (implicit barrier after)
+       │  │
+       │  ├─ IF first_unsafe < actual:
+       │  │  │
+       │  │  ├─ #pragma omp single      [Only T0]
+       │  │  │  └─ Apply unsafe update (AddEdge)
+       │  │  │     (implicit barrier)
+       │  │  │
+       │  │  ├─ For each matching order i:
+       │  │  │
+       │  │  │  ├─ #pragma omp single      [T0]
+       │  │  │  │  └─ Set up m[], visited_[]
+       │  │  │  │
+       │  │  │  └─ Parallel_FindMatches2_inner()  [T0-T7]
+       │  │  │     │
+       │  │  │     ├─ #pragma omp single   [T0 only]
+       │  │  │     │  └─ Build vertex_vector
+       │  │  │     │
+       │  │  │     ├─ #pragma omp for     [T0-T7]
+       │  │  │     │  └─ Process vertex_vector
+       │  │  │     │     └─ Each thread recurses independently
+       │  │  │     │
+       │  │  │     ├─ #pragma omp atomic  [T0-T7]
+       │  │  │     │  └─ Accumulate results
+       │  │  │     │
+       │  │  │     └─ #pragma omp barrier [T0-T7]
+       │  │  │        └─ Wait for all
+       │  │
+       │  └─ Continue while loop
+       │
+       └─ [End parallel] [ONLY ONE FORK/JOIN FOR ENTIRE STREAM]
+
+
+================================================================================
+MATCHING ORDER STRUCTURE EXAMPLE (8-vertex tree):
+================================================================================
+
+Query Graph: Linear tree 0-1-2-3-4-5-6-7
+
+GenerateMatchingOrder() produces:
+
+order_vs_[0] = [0, 1, 2, 3, 4, 5, 6, 7]  // Global: highest degree first
+               └─ Used in InitialMatching()
+
+order_vs_[1] = [0, 1, 2, 3, 4, 5, 6, 7]  // Starting from edge (0-1)
+order_vs_[2] = [1, 2, 0, 3, 4, 5, 6, 7]  // Starting from edge (1-2)
+order_vs_[3] = [2, 3, 1, 4, 5, 6, 7, 0]  // Starting from edge (2-3)
+...
+order_vs_[7] = [6, 7, 5, 4, 3, 2, 1, 0]  // Starting from edge (6-7)
+
+When data edge matches query edge i:
+  └─ Use order_vs_[i] to traverse (optimized starting point)
+
+
+================================================================================
+DATA STRUCTURES:
+================================================================================
+
+Member variables in Parallel_Graphflow class:
+
+Matching orders:
+  std::vector<std::vector<uint>> order_vs_;      // [NumEdges][NumVertices]
+  std::vector<std::vector<uint>> order_csrs_;    // CSR format connectivity
+  std::vector<std::vector<uint>> order_offs_;    // CSR format offsets
+
+Work queues:
+  std::vector< tuple<...> > vertex_vector;       // Candidates for parallel
+  tbb::concurrent_queue<StealWork> steal_queue_; // Work stealing
+  tbb::concurrent_queue<tuple> job_queue;        // Background task queue
+
+Thread-local data:
+  std::vector<std::vector<uint>> local_vec_m;    // Per-thread mappings
+  std::vector<std::vector<bool>> local_vec_visited_local;  // Per-thread visited
+
+Persistent thread pool:
+  std::unique_ptr<tf::Executor> persistent_executor_;  // Taskflow executor
+  std::vector<std::thread> pool_workers_;        // Worker threads
+  std::atomic<uint64_t> pool_epoch_;             // Synchronization epoch
+  std::atomic<size_t> pool_next_item_;           // Work distribution counter
+
+Config:
+  size_t NUMTHREAD;    // Number of threads
+  size_t auto_tuning;  // Auto-tuning enabled (0/1)
+

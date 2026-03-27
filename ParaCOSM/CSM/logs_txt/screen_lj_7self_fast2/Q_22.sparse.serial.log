@@ -1,0 +1,8 @@
+----------- Loading graphs ------------
+# vertices = 7
+# edges = 5
+# vertices = 4847571
+# edges = 38566113
+Load Graphs: 53376ms
+------------ Preprocessing ------------
+timeout: the monitored command dumped core

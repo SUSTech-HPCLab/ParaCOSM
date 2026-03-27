@@ -129,26 +129,35 @@ def run_one(
     env = dict(os.environ)
     env["OMP_NUM_THREADS"] = str(threads)
 
-    completed = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        timeout=args.run_timeout,
-        env=env,
-        cwd=str(exe.resolve().parent),
-        check=False,
-    )
-    combined_output = completed.stdout if not completed.stderr else f"{completed.stdout}\n[stderr]\n{completed.stderr}"
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=args.run_timeout,
+            env=env,
+            cwd=str(exe.resolve().parent),
+            check=False,
+        )
+        combined_output = completed.stdout if not completed.stderr else f"{completed.stdout}\n[stderr]\n{completed.stderr}"
+        return_code = completed.returncode
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout or ""
+        stderr = exc.stderr or ""
+        combined_output = stdout if not stderr else f"{stdout}\n[stderr]\n{stderr}"
+        combined_output = f"{combined_output}\n[outer-timeout]\nsubprocess timeout after {args.run_timeout}s\n"
+        return_code = 124
+
     log_path.write_text(combined_output, encoding="utf-8")
 
     return RunStats(
-        return_code=completed.returncode,
+        return_code=return_code,
         initial_matches=extract_first_int(INITIAL_MATCHES_RE, combined_output),
         positive_matches=extract_first_int(POSITIVE_MATCHES_RE, combined_output),
         negative_matches=extract_first_int(NEGATIVE_MATCHES_RE, combined_output),
         incremental_ms=extract_time_ms(combined_output),
         edge_updates=extract_first_int(EDGE_UPDATES_RE, combined_output),
-        timed_out=bool(TIMEOUT_RE.search(combined_output)),
+        timed_out=bool(TIMEOUT_RE.search(combined_output)) or return_code == 124,
         log_path=str(log_path),
     )
 

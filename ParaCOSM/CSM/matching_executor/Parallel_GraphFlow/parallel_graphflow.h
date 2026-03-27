@@ -80,6 +80,17 @@ public:
     void AddEdge(uint v1, uint v2, uint label) override;
     void RemoveEdge(uint v1, uint v2) override;
 
+    /**
+     * @brief Enumerate matches for an edge already in the graph (thread-safe).
+     * Uses FindMatches_local with local_vec_visited_local[thread_id].
+     */
+    size_t EnumerateNewEdge(uint v1, uint v2, uint label, size_t thread_id) override;
+
+    /**
+     * @brief Resize per-thread state for batch enumeration.
+     */
+    void PrepareBatchEnumeration(size_t num_threads) override;
+
     // Single OMP parallel region for entire update stream
     void PersistentParallelUpdate(
         Graph& data_graph,

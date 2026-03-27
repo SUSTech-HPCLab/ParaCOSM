@@ -2767,6 +2767,87 @@ void Parallel_Graphflow::AddEdge(uint v1, uint v2, uint label)
     num_positive_results_ += num_results;
 }
 
+// ---------------------------------------------------------------------------
+// Batch-all helpers: thread-safe enumeration without graph mutation
+// ---------------------------------------------------------------------------
+
+void Parallel_Graphflow::PrepareBatchEnumeration(size_t num_threads)
+{
+    const size_t nv = data_.NumVertices();
+    // Ensure we have enough per-thread visited / m arrays
+    if (local_vec_visited_local.size() < num_threads) {
+        local_vec_visited_local.resize(num_threads, std::vector<bool>(nv, false));
+    }
+    // Also make sure each existing array is large enough (graph may have grown)
+    for (size_t t = 0; t < local_vec_visited_local.size(); t++) {
+        if (local_vec_visited_local[t].size() < nv)
+            local_vec_visited_local[t].resize(nv, false);
+    }
+    if (local_vec_m.size() < num_threads) {
+        local_vec_m.resize(num_threads, std::vector<uint>(query_.NumVertices(), UNMATCHED));
+    }
+}
+
+size_t Parallel_Graphflow::EnumerateNewEdge(uint v1, uint v2, uint label, size_t thread_id)
+{
+    if (max_num_results_ == 0) return 0;
+
+    // Use the per-thread m vector (reset it first)
+    auto& m = local_vec_m[thread_id];
+    std::fill(m.begin(), m.end(), UNMATCHED);
+
+    size_t num_results = 0;
+
+    for (uint i = 0; i < query_.NumEdges(); i++)
+    {
+        uint u1 = order_vs_[i][0], u2 = order_vs_[i][1];
+        auto temp_q_labels = query_.GetEdgeLabel(u1, u2);
+
+        // check v1 → v2
+        if (
+            std::get<0>(temp_q_labels) == data_.GetVertexLabel(v1) &&
+            std::get<1>(temp_q_labels) == data_.GetVertexLabel(v2) &&
+            std::get<2>(temp_q_labels) == label
+        ) {
+            m[u1] = v1;
+            m[u2] = v2;
+            local_vec_visited_local[thread_id][v1] = true;
+            local_vec_visited_local[thread_id][v2] = true;
+
+            FindMatches_local(i, 2, m, num_results, thread_id);
+
+            local_vec_visited_local[thread_id][v1] = false;
+            local_vec_visited_local[thread_id][v2] = false;
+            m[u1] = UNMATCHED;
+            m[u2] = UNMATCHED;
+
+            if (num_results >= max_num_results_ || reach_time_limit) break;
+        }
+
+        // check v2 → v1
+        if (
+            std::get<0>(temp_q_labels) == data_.GetVertexLabel(v2) &&
+            std::get<1>(temp_q_labels) == data_.GetVertexLabel(v1) &&
+            std::get<2>(temp_q_labels) == label
+        ) {
+            m[u1] = v2;
+            m[u2] = v1;
+            local_vec_visited_local[thread_id][v2] = true;
+            local_vec_visited_local[thread_id][v1] = true;
+
+            FindMatches_local(i, 2, m, num_results, thread_id);
+
+            local_vec_visited_local[thread_id][v2] = false;
+            local_vec_visited_local[thread_id][v1] = false;
+            m[u1] = UNMATCHED;
+            m[u2] = UNMATCHED;
+
+            if (num_results >= max_num_results_ || reach_time_limit) break;
+        }
+    }
+    return num_results;
+}
+
 void Parallel_Graphflow::AddEdgeWithSubflow(uint v1, uint v2, uint label, tf::Subflow& sf)
 {
     data_.AddEdge(v1, v2, label);

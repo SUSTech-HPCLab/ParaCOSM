@@ -1,0 +1,25 @@
+----------- Loading graphs ------------
+# vertices = 403394  # edges = 2199067  vlabel size = 6  elabel size = 1
+Load Graphs Time: 1468.2855225ms
+------------ Preprocessing ------------
+Preprocessing: 124.2376938ms
+----------- Initial Matching ----------
+Initial Matching: 1172.0965576ms
+10621959 matches. 
+
+Peak Virtual Memory: 367.2929688 MB
+--------- Incremental Matching --------
+# update size = 244341
+#Time: 3031.966797 ms 
+query: /home/v-haibinlai/haibin/ParaCOSM/ParaCOSM/CSM/generated_slow_queries/9v/generated_queries/Q_gen_008
+0 vertex updates.
+244341 edge updates.
+28772933 positive matches.
+0 negative matches.
+#num: 28772933
+
+# edges in index in total: 0
+# vertices in index in total: 0
+Peak Virtual Memory: 447.4570312 MB
+
+----------------- End -----------------

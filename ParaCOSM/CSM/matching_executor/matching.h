@@ -56,10 +56,34 @@ public:
 
     virtual bool Classify(uint v1, uint v2, uint label);
 
+    /**
+     * @brief Enumerate new matches for an edge that is ALREADY in the data graph.
+     *
+     * Unlike AddEdge(), this does NOT call data_.AddEdge(). It only enumerates
+     * subgraph matches that contain the given edge. Must be safe for concurrent
+     * calls from different threads when each thread uses a distinct thread_id.
+     *
+     * @param v1    Source vertex of the edge (already in graph)
+     * @param v2    Target vertex of the edge (already in graph)
+     * @param label Edge label
+     * @param thread_id  Caller's thread ID for accessing thread-local state
+     * @return Number of new matches found
+     */
+    virtual size_t EnumerateNewEdge(uint v1, uint v2, uint label, size_t thread_id);
+
+    /**
+     * @brief Prepare per-thread state for EnumerateNewEdge batch calls.
+     * @param num_threads  Number of threads that will call EnumerateNewEdge concurrently
+     */
+    virtual void PrepareBatchEnumeration(size_t num_threads);
+
     // get execution info
     void GetNumInitialResults(size_t &num_initial_results);
     void GetNumPositiveResults(size_t &num_positive_results);
     void GetNumNegativeResults(size_t &num_negative_results);
+
+    /// Thread-safe: atomically add to the positive results counter.
+    void AddPositiveResults(size_t delta) { num_positive_results_ += delta; }
 
     void PrintCounter();
     
