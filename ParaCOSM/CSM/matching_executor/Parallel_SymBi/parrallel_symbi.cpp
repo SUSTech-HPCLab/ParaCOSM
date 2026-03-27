@@ -3639,6 +3639,151 @@ void Parrllel_SymBi::AddEdge(uint v1, uint v2, uint label)
         
     } // end of section
 
+// ---------------------------------------------------------------------------
+// batch_all support: UpdateIndexForEdge + EnumerateNewEdge + PrepareBatchEnumeration
+// ---------------------------------------------------------------------------
+
+void Parrllel_SymBi::UpdateIndexForEdge(uint v1, uint v2, uint label)
+{
+    // DCS index update — extracted from the first half of AddEdge().
+    std::queue<std::pair<uint, uint>> Q1_para, Q2_para;
+    auto v1_label = data_.GetVertexLabel(v1);
+
+    for (uint u1 = 0; u1 < query_.NumVertices(); u1++) {
+        if (v1_label != query_.GetVertexLabel(u1)) continue;
+        for (uint u2 = 0; u2 < query_.NumVertices(); u2++) {
+            if (data_.GetVertexLabel(v2) != query_.GetVertexLabel(u2)) continue;
+            if (std::get<2>(query_.GetEdgeLabel(u1, u2)) != label) continue;
+
+            bool reversed = false;
+            if (std::find(treeNode_[u1].backwards_.begin(), treeNode_[u1].backwards_.end(), u2) != treeNode_[u1].backwards_.end())
+            {
+                std::swap(u1, u2);
+                std::swap(v1, v2);
+                reversed = true;
+            }
+            if (std::find(treeNode_[u2].backwards_.begin(), treeNode_[u2].backwards_.end(), u1) != treeNode_[u2].backwards_.end())
+            {
+                auto it = std::lower_bound(DCS_[eidx_[u1][u2]][v1].begin(), DCS_[eidx_[u1][u2]][v1].end(), v2);
+                DCS_[eidx_[u1][u2]][v1].insert(it, v2);
+                it = std::lower_bound(DCS_[eidx_[u2][u1]][v2].begin(), DCS_[eidx_[u2][u1]][v2].end(), v1);
+                DCS_[eidx_[u2][u1]][v2].insert(it, v1);
+
+                bool old_p_d1 = d1[u1][v1], old_p_d2 = d2[u1][v1], old_c_d2 = d2[u2][v2];
+
+                if (old_p_d1)
+                    InsertionTopDown_para(u1, u2, v2, Q1_para, Q2_para);
+                if (old_c_d2)
+                    InsertionBottomUp_para(u2, u1, v1, Q2_para);
+                if (old_p_d2)
+                    n2[eidx_[u2][u1]][v2] += 1;
+
+                while (!Q1_para.empty()) {
+                    auto [u_queue, v_queue] = Q1_para.front();
+                    Q1_para.pop();
+                    for (auto& u_c_queue : treeNode_[u_queue].forwards_)
+                        for (auto& v_c_queue : DCS_[eidx_[u_queue][u_c_queue]][v_queue])
+                            InsertionTopDown_para(u_queue, u_c_queue, v_c_queue, Q1_para, Q2_para);
+                }
+                while (!Q2_para.empty()) {
+                    auto [u_queue, v_queue] = Q2_para.front();
+                    Q2_para.pop();
+                    for (size_t i = 0; i < treeNode_[u_queue].backwards_.size(); ++i) {
+                        auto& u_p_queue = treeNode_[u_queue].backwards_[i];
+                        for (size_t j = 0; j < DCS_[eidx_[u_queue][u_p_queue]][v_queue].size(); ++j)
+                            InsertionBottomUp_para(u_queue, u_p_queue, DCS_[eidx_[u_queue][u_p_queue]][v_queue][j], Q2_para);
+                    }
+                    for (size_t i = 0; i < treeNode_[u_queue].forwards_.size(); ++i) {
+                        auto& u_c_queue = treeNode_[u_queue].forwards_[i];
+                        for (size_t j = 0; j < DCS_[eidx_[u_queue][u_c_queue]][v_queue].size(); ++j)
+                            n2[eidx_[u_c_queue][u_queue]][DCS_[eidx_[u_queue][u_c_queue]][v_queue][j]] += 1;
+                    }
+                }
+            }
+            if (reversed) {
+                std::swap(u1, u2);
+                std::swap(v1, v2);
+            }
+        }
+    }
+}
+
+void Parrllel_SymBi::PrepareBatchEnumeration(size_t num_threads)
+{
+    const size_t nv = data_.NumVertices();
+    const size_t nq = query_.NumVertices();
+    if (local_vec_visited_local.size() < num_threads)
+        local_vec_visited_local.resize(num_threads, std::vector<bool>(nv, false));
+    for (size_t t = 0; t < local_vec_visited_local.size(); t++)
+        if (local_vec_visited_local[t].size() < nv)
+            local_vec_visited_local[t].resize(nv, false);
+    if (local_vec_m.size() < num_threads)
+        local_vec_m.resize(num_threads, std::vector<uint>(nq, UNMATCHED));
+    if (local_vec_extendable.size() < num_threads)
+        local_vec_extendable.resize(num_threads, std::vector<ExtendableVertex>(nq));
+}
+
+size_t Parrllel_SymBi::EnumerateNewEdge(uint v1, uint v2, uint label, size_t thread_id)
+{
+    if (max_num_results_ == 0) return 0;
+
+    auto& m = local_vec_m[thread_id];
+    std::fill(m.begin(), m.end(), UNMATCHED);
+
+    size_t num_results = 0;
+
+    for (uint u1 = 0; u1 < query_.NumVertices(); u1++) {
+        if (data_.GetVertexLabel(v1) != query_.GetVertexLabel(u1)) continue;
+        for (uint u2 = 0; u2 < query_.NumVertices(); u2++) {
+            if (data_.GetVertexLabel(v2) != query_.GetVertexLabel(u2)) continue;
+            if (std::get<2>(query_.GetEdgeLabel(u1, u2)) != label) continue;
+
+            bool reversed = false;
+            if (std::find(treeNode_[u1].backwards_.begin(), treeNode_[u1].backwards_.end(), u2) != treeNode_[u1].backwards_.end())
+            {
+                std::swap(u1, u2);
+                std::swap(v1, v2);
+                reversed = true;
+            }
+            if (std::find(treeNode_[u2].backwards_.begin(), treeNode_[u2].backwards_.end(), u1) != treeNode_[u2].backwards_.end()
+                && d2[u1][v1] == 1 && d2[u2][v2] == 1)
+            {
+                m[u1] = v1;
+                m[u2] = v2;
+                local_vec_visited_local[thread_id][v1] = true;
+                local_vec_visited_local[thread_id][v2] = true;
+
+                std::vector<ExtendableVertex> extendable(query_.NumVertices());
+                for (auto u : {u1, u2}) {
+                    for (auto& u_other : treeNode_[u].neighbors_) {
+                        if (m[u_other] != UNMATCHED) continue;
+                        if (n2[eidx_[u][u_other]][m[u]] < extendable[u_other].E) {
+                            extendable[u_other].E = n2[eidx_[u][u_other]][m[u]];
+                            extendable[u_other].u_min = u;
+                        }
+                        extendable[u_other].matched_nbrs++;
+                    }
+                }
+
+                Parallel_FindMatches_local3(2, m, extendable, num_results, thread_id);
+
+                local_vec_visited_local[thread_id][v1] = false;
+                local_vec_visited_local[thread_id][v2] = false;
+                m[u1] = UNMATCHED;
+                m[u2] = UNMATCHED;
+
+                if (num_results >= max_num_results_ || reach_time_limit) goto DONE;
+            }
+            if (reversed) {
+                std::swap(u1, u2);
+                std::swap(v1, v2);
+            }
+        }
+    }
+    DONE:
+    return num_results;
+}
+
 
 /**
  * @brief Removes an edge from the data graph and updates the subgraph matching index.
