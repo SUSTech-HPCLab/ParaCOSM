@@ -67,6 +67,24 @@ bool matching::Classify(uint v1, uint v2, uint label){
     return false;
 }
 
+size_t matching::EnumerateNewEdge(uint v1, uint v2, uint label, size_t /*thread_id*/)
+{
+    // Default: fall back to AddEdge (NOT thread-safe, NOT batch-safe)
+    size_t before = num_positive_results_;
+    AddEdge(v1, v2, label);
+    return num_positive_results_ - before;
+}
+
+void matching::PrepareBatchEnumeration(size_t /*num_threads*/)
+{
+    // Default: nothing to prepare
+}
+
+void matching::UpdateIndexForEdge(uint /*v1*/, uint /*v2*/, uint /*label*/)
+{
+    // Default: no-op (algorithms without auxiliary indices)
+}
+
 void matching::GetNumInitialResults(size_t &num_initial_results)
 {
     num_initial_results = num_initial_results_;

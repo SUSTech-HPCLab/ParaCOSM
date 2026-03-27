@@ -1,0 +1,9 @@
+----------- Loading graphs ------------
+# vertices = 403394  # edges = 2199067  vlabel size = 6  elabel size = 1
+Load Graphs Time: 1671.7880859ms
+------------ Preprocessing ------------
+Preprocessing: 128.4012451ms
+----------- Initial Matching ----------
+Timeout 30s
+Initial Matching: 30000.3281250ms
+287264717 matches. 

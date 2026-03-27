@@ -1,0 +1,3 @@
+query,type,mode,initial,positive,negative,updates,time_ms,exit_code
+Q_1,sparse,batch3,455130229,?,?,?,?,1
+Q_1,sparse,persistent,523403171,?,?,?,?,1

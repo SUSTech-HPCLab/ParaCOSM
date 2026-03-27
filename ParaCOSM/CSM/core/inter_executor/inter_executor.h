@@ -229,6 +229,27 @@ public:
     );
 
     /**
+     * @brief Batch-all mode: pre-classify ALL updates, add unsafe edges to graph,
+     * then enumerate matches for ALL unsafe edges in parallel across threads.
+     *
+     * This achieves inter-update parallelism: multiple unsafe edges' match
+     * enumeration runs concurrently on different threads, each using thread-local
+     * visited arrays via EnumerateNewEdge(). Note: match counts may differ
+     * slightly from serial processing because all unsafe edges are visible in
+     * the graph simultaneously.
+     */
+    void BatchUpdates_AllAtOnce(
+        size_t& num_v_updates,
+        size_t& num_e_updates,
+        size_t& unsafe_updates,
+        size_t& count,
+        size_t& positive_num_results_last,
+        size_t& negative_num_results_last,
+        std::atomic_bool& reach_time_limit,
+        size_t num_threads = 8
+    );
+
+    /**
      * DegreePruning
      *
      * Check degree-based pruning constraints for mapping query vertices (u1, u2)

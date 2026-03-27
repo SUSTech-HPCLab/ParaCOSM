@@ -73,6 +73,10 @@ public:
     void RemoveEdge(uint v1, uint v2) override;
     void AddVertex(uint id, uint label) override;
     void RemoveVertex(uint id) override;
+
+    // batch_all support
+    size_t EnumerateNewEdge(uint v1, uint v2, uint label, size_t thread_id) override;
+    void UpdateIndexForEdge(uint v1, uint v2, uint label) override;
     
     void GetMemoryCost(size_t &num_edges, size_t &num_vertices) override;
     void TimePrint();
@@ -104,6 +108,21 @@ private:
     void unsetMatchVertex(const std::vector<uint> & matchingIndex);
     void unsetMatchVertex(const std::vector<std::pair<uint,uint>> & matchingIndex);
     void addMatchResult(uint queryIndex, uint edgeIndex, searchType type);
+    CSMPP CreateBranchWorker() const;
+    void CopySearchStateToWorker(CSMPP & worker) const;
+    void MergeWorkerCounters(const CSMPP & worker);
+    bool ShouldParallelizeFreeVertex(
+        uint queryIndex,
+        uint depth,
+        vertexType currentSearchVertexType,
+        const std::vector<std::pair<uint, uint>> & freezeIndex,
+        size_t candidateCount) const;
+    void SearchFreeVertexCandidates(
+        uint queryIndex,
+        uint edgeIndex,
+        searchType type,
+        uint depth,
+        const std::vector<uint> & candidate);
 
 
 

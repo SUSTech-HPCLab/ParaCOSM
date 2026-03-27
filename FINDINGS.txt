@@ -1,0 +1,269 @@
+================================================================================
+PARALLEL GRAPHFLOW CALL CHAIN ANALYSIS - KEY FINDINGS
+================================================================================
+
+1. PARALLEL_FINDMATCHES2 CALL TRIGGERS
+================================================================================
+
+The ~120K+ calls are triggered by:
+
+A. ENTRY POINTS:
+   • AddEdge(v1, v2, label) - Called ONCE per unsafe edge update (~50 times)
+     Location: line 2663
+     
+   • RemoveEdge(v1, v2) - Called ONCE per unsafe edge removal
+     Location: line 2885
+     
+   • InitialMatching() - Called ONCE at preprocessing
+     Location: line 2550
+
+B. WHAT HAPPENS IN ADDEDGE (MOST COMMON PATH):
+   
+   Line 2672: for (uint i = 0; i < query_.NumEdges(); i++)
+   └─ Iterates through ALL query edges (8 for 8-vertex query)
+   
+   Line 2678-2681: Checks if data_edge matches query_edge[i]
+   └─ Two orientations checked: (v1→v2) and (v2→v1)
+   
+   Line 2694, 2725: taskflow_findmatches_layer(i, 2, m, num_results)
+   └─ WRAPPER that directly calls Parallel_FindMatches2()
+   
+   RESULT: Each AddEdge call triggers ~2-16 PFM2 invocations
+   (depends on how many query edges the data edge matches)
+
+C. THE MULTIPLIER - vertex_vector:
+   
+   Inside Parallel_FindMatches2 (line 1185):
+   
+   Line 1200: vertex_vector.clear()
+   
+   Line 1221-1319: First layer expansion (depth 1→2)
+   └─ For each candidate at depth 1:
+      • Validates (labels, joinability, visited)
+      • If depth < N-1, add to vertex_vector (line 1302)
+      
+   Line 1322-1329: Auto-tuning
+   └─ if(vertex_vector.size() < NUMT) then NUMT = vertex_vector.size()
+   
+   Line 1339: #pragma omp parallel for num_threads(NUMT) schedule(dynamic, 1)
+   └─ PARALLELIZES over vertex_vector.size() iterations
+   
+   Each iteration calls:
+   Line 1356: ProcessNeighbor(u2, u_min3, u_min_label3, ...)
+   └─ Which calls FindMatches_local() recursively
+   └─ Which recurses from depth+2 down to depth=N
+
+D. THE CALL FORMULA:
+
+   Total PFM2 calls ≈ 
+   [unsafe_edge_updates] × [avg_matching_query_edges] × [avg_iterations_per_addon]
+   
+   For 8v tree: ~50 unsafe × 8 edges × variable = ?
+   
+   BUT: The 120K count likely includes:
+   - Direct PFM2 calls from AddEdge
+   - PLUS internal recursive calls from ProcessNeighbor→FindMatches_local
+   - PLUS multiple passes through vertex_vector in parallel loop
+   
+   **The profiler is counting something beyond just PFM2 entry points**
+
+================================================================================
+2. ORDER_VS_ AND MATCHING ORDERS
+================================================================================
+
+Structure (line 21, 26):
+   std::vector<std::vector<uint>> order_vs_;  // Size: [query_.NumEdges()][query_.NumVertices()]
+
+Generation (GenerateMatchingOrder, line 120-253):
+
+   Phase 1 - Global order (lines 123-169):
+   • order_vs_[0] = global optimal matching order
+   • Starts with highest-degree vertex
+   • Expands by maximum connectivity heuristic
+   • Used for InitialMatching()
+   
+   Phase 2 - Incremental orders (lines 172-222):
+   • For each query edge i:
+     - order_vs_[i][0..1] = the two vertices of edge i
+     - order_vs_[i][2..N] = remaining vertices ordered by connectivity
+   • Total orders = query_.NumEdges()
+   
+   Example (8-vertex tree):
+   order_vs_[0] = [v_highest_degree, ..., v_lowest_degree]  // global
+   order_vs_[1] = [v_edge1_start, v_edge1_end, ..., others]  // incremental
+   order_vs_[2] = [v_edge2_start, v_edge2_end, ..., others]  // incremental
+   ... (8 total matching orders)
+
+Matching Orders:
+   • Global order (order_vs_[0]): Used once in InitialMatching()
+   • Edge-specific orders (order_vs_[1..NumEdges-1]): 
+     Used when AddEdge/RemoveEdge triggers that edge
+   • Why multiple orders? Optimization: each edge update can use
+     the optimal order starting from that edge's vertices
+
+================================================================================
+3. NESTED #pragma omp ANALYSIS
+================================================================================
+
+A. MAIN PARALLEL LOOP (Line 1339):
+   #pragma omp parallel for num_threads(NUMT) schedule(dynamic, 1)
+   for(size_t t_1 = 0; t_1 < vertex_vector.size(); t_1++)
+   
+   • Creates parallel region with NUMT threads
+   • Uses dynamic scheduling with chunk size 1
+   • Iterates over vertex_vector entries
+   • Each thread calls ProcessNeighbor() which recurses
+
+B. INNER VERSION - Parallel_FindMatches2_inner (Line 1513-1589):
+   
+   Purpose: Called INSIDE existing #pragma omp parallel region
+   to avoid nested parallel (which is expensive)
+   
+   Structure:
+   Line 1520: #pragma omp single
+   └─ ONE thread builds vertex_vector (lines 1521-1567)
+   
+   Line 1574: #pragma omp for schedule(dynamic, 1)
+   └─ ALL threads parallelize over vertex_vector
+   
+   Line 1586: #pragma omp atomic
+   └─ Atomic increment of shared num_results
+   
+   Line 1588: #pragma omp barrier
+   └─ Wait for all threads before return
+   
+   Usage (Line 3173):
+   Inside PersistentParallelUpdate's outer #pragma omp parallel
+   calls Parallel_FindMatches2_inner() to reuse thread team
+
+C. PERSISTENT UPDATE LOOP (Line 3090-3221):
+   
+   #pragma omp parallel num_threads(NUMTHREAD)  // ONE fork for entire update stream
+   {
+       while (sliding_window_base < update_size) {
+           #pragma omp single          // Phase 1: Apply vertex adds
+           #pragma omp for             // Phase 2: Parallel classify
+           #pragma omp single          // Phase 3: Find first unsafe
+           // ... then call Parallel_FindMatches2_inner (reuses team)
+       }
+   }
+   
+   NO NESTED PARALLEL: Threads stay alive for entire update stream
+   Benefits: Eliminates fork/join overhead per update
+
+================================================================================
+4. auto_tuning MECHANISM
+================================================================================
+
+Code (Constructor, lines 54-68):
+
+if(this->auto_tuning == 1) {
+    if(query_.NumVertices() < 7) {
+        if(NUMTHREAD > query_.NumVertices()) {
+            if(data_graph.NumEdges() > BIG_DATASET) {
+                NUMTHREAD = query_.NumVertices();
+            } else {
+                NUMTHREAD = query_.NumVertices() - 2;
+            }
+        }
+    }
+}
+
+When it runs: Constructor only, once at initialization
+What it does:
+   • For small queries (< 7 vertices)
+   • If thread count exceeds query size
+   • Reduce threads to query.NumVertices() or query.NumVertices()-2
+   • Rationale: More threads than independent vertices = wasted overhead
+
+Also in Parallel_FindMatches2 (line 1322-1329):
+   if(vertex_vector.size() < NUMT) {
+       NUMT = vertex_vector.size()  // Don't create more threads than work
+   }
+
+Where it's DISABLED (line 1333-1336):
+   // if(auto_tuning == 1) {
+   //     if(vertex_vector.size() > NUMT) {
+   //         NUMT = vertex_vector.size();
+   //     }
+   // }
+   // This could dynamically increase threads, but it's commented out
+
+================================================================================
+5. COMMENTED-OUT ALTERNATIVES
+================================================================================
+
+A. Parallel_FindMatches (line 970-1140):
+   Line 1097-1106: Attempted to explicitly push work items to vertex_vector
+   Current code inlines the expansion, but old code would create:
+   vertex_vector.emplace_back(v, v2, u2, u_min2, u_min_label2,
+                              q_nbrs2, q_nbr_labels2, ...)
+   DISABLED: Not using this approach anymore
+
+B. Parallel_FindMatches2 (line 1116-1138):
+   Code to process vertex_vector elements AFTER recursion
+   COMMENTED OUT: This would be a second pass - not currently used
+
+C. Auto-tuning scale-up (line 1333-1336):
+   Could increase NUMT if vertex_vector is larger than NUMT
+   DISABLED: Current code only decreases NUMT, doesn't increase
+
+================================================================================
+6. PROFILING/TIMING HOOKS
+================================================================================
+
+NONE FOUND in the code.
+
+What exists:
+   • Debug output via std::cout (sporadic, e.g., line 1802)
+   • Preprocessing output: print_preprocessing_results_ flag
+   • Enumeration output: print_enumeration_results_ flag
+   
+What's MISSING:
+   • No #include <chrono> in parallel_graphflow.cpp
+   • No performance timers/counters
+   • No thread-local metrics collection
+   • No hardware counter access
+   • No profiling hooks
+   
+   (Note: main.cpp has timing via chrono, but matching engine doesn't)
+
+================================================================================
+7. THE 120K+ MYSTERY - BEST EXPLANATION
+================================================================================
+
+Given data:
+   • 8-vertex query: ~120K calls of PFM2
+   • 9-vertex query: ~177K calls of PFM2
+
+Analysis:
+   If direct AddEdge calls account for only ~800-1600 calls,
+   where do the remaining 118K-175K come from?
+
+Option 1: PROFILER COUNTS RECURSIVE CALLS
+   The profiler might count:
+   - PFM2 entry (1 call) + all recursive FindMatches_local calls = many calls
+   - Each ProcessNeighbor invokes FindMatches_local (depth+1 recursive)
+   - Each FindMatches_local can call itself many times
+   - Total = exponential growth relative to vertex_vector entries
+   
+   For 8-vertex query with branching factor ~3-5 at each depth:
+   - Depth 2: ~100 vertices in vertex_vector
+   - Depth 3: each spawns ~3-5 recursive calls
+   - Depth 4+: factorial growth
+   - Could easily reach 100K+ total recursive invocations
+
+Option 2: DIFFERENT DATASET
+   The 120K-177K might be for a different graph size or density
+   (not the toy 8-9 vertex examples used for testing)
+
+Option 3: INTERNAL LOOP COUNTING
+   Profiler might count inner for-loop iterations, not just function calls
+   Each PFM2 processes u_min_nbrs (thousands of candidates)
+   Could accumulate to 120K if counting all candidate iterations
+
+RECOMMENDATION:
+   Need to instrument code with timing/counting to determine exactly
+   what triggers the 120K calls - direct PFM2 entry points or recursion
+
+================================================================================

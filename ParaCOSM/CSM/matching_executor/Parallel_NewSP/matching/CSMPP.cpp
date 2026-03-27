@@ -17,6 +17,11 @@
 #include "matching/CSMPP.h"
 #include "configuration/config.h"
 
+namespace {
+constexpr uint kParallelCandidateDepthLimit = 2;
+constexpr size_t kParallelCandidateMinSize = 256;
+}
+
 
 CSMPP::CSMPP(Graph& data_graph, 
         Graph& query_graph,
@@ -234,6 +239,39 @@ void CSMPP::Safe_Update(uint v1, uint v2, uint label){
     this->data_.indexUpdate(v1, v2, label, true);
 }
 
+// ---------------------------------------------------------------------------
+// batch_all support
+// ---------------------------------------------------------------------------
+
+void CSMPP::UpdateIndexForEdge(uint v1, uint v2, uint label)
+{
+    // Same as Safe_Update but edge already added to data graph by caller
+    this->data_.indexUpdate(v1, v2, label, true);
+}
+
+size_t CSMPP::EnumerateNewEdge(uint v1, uint v2, uint label, size_t /*thread_id*/)
+{
+    // Create an isolated worker to avoid any shared state issues.
+    // searchInit() already creates sub-workers internally for multi-query
+    // parallelism, so we disable nested OMP here and run serially per-edge.
+    CSMPP worker(
+        this->data_,
+        this->query_,
+        this->queryVec,
+        static_cast<uint>(this->max_num_results_),
+        this->print_preprocessing_results_,
+        this->print_enumeration_results_,
+        this->homomorphism_,
+        this->print_init
+    );
+    worker.updateEdgeFindQuery = this->updateEdgeFindQuery;
+    worker.initEdgeFindQuery = this->initEdgeFindQuery;
+
+    worker.searchInit(v1, v2, label, pos);
+
+    return worker.num_positive_results_;
+}
+
 
 /**
  * @description: after a edge remove, begin search subgraph and update graph
@@ -259,13 +297,22 @@ void CSMPP::Safe_Update_remove(uint v1, uint v2){
 void CSMPP::AddVertex(uint id, uint label)
 {
     data_.AddVertex(id, label);
-    
+
+    // Ensure index covers the new vertex
+    if(id >= data_.index.size()){
+        size_t old_sz = data_.index.size();
+        uint arr_sz = data_.NumVLabels() + data_.NumELabels();
+        data_.index.resize(id + 1, nullptr);
+        for(size_t k = old_sz; k <= id; k++){
+            data_.index[k] = new int[arr_sz]{0};
+        }
+    }
+
     visited_.resize(id + 1, false);
 
     for(int i =0; i < Thread_MAX; i++){
         visited_parallel[i].resize(id + 1, false);
     }
-    // visited_parallel
 }
 
 void CSMPP::RemoveVertex(uint id)
@@ -544,6 +591,131 @@ void CSMPP::searchInit(uint v1, uint v2, uint label, searchType type){
             this->num_intermediate_results_after_visit_check_ += worker.num_intermediate_results_after_visit_check_;
             this->num_intermediate_results_with_empty_candidate_set_ += worker.num_intermediate_results_with_empty_candidate_set_;
             this->num_intermediate_results_without_results_ += worker.num_intermediate_results_without_results_;
+        }
+    }
+}
+
+CSMPP CSMPP::CreateBranchWorker() const {
+    CSMPP worker(
+        this->data_,
+        this->query_,
+        const_cast<std::vector<Graph>&>(this->queryVec),
+        static_cast<uint>(this->max_num_results_),
+        this->print_preprocessing_results_,
+        this->print_enumeration_results_,
+        this->homomorphism_,
+        this->print_init
+    );
+    worker.updateEdgeFindQuery = this->updateEdgeFindQuery;
+    worker.initEdgeFindQuery = this->initEdgeFindQuery;
+    CopySearchStateToWorker(worker);
+    return worker;
+}
+
+void CSMPP::CopySearchStateToWorker(CSMPP & worker) const {
+    worker.queryVec = this->queryVec;
+    worker.match = this->match;
+    worker.matchCandidate = this->matchCandidate;
+    worker.visited_ = this->visited_;
+    worker.num_initial_results_ = 0;
+    worker.num_positive_results_ = 0;
+    worker.num_negative_results_ = 0;
+    worker.num_intermediate_results_before_index_check_ = 0;
+    worker.num_intermediate_results_after_index_check_ = 0;
+    worker.num_intermediate_results_after_joinability_check_ = 0;
+    worker.num_intermediate_results_after_visit_check_ = 0;
+    worker.num_intermediate_results_with_empty_candidate_set_ = 0;
+    worker.num_intermediate_results_without_results_ = 0;
+}
+
+void CSMPP::MergeWorkerCounters(const CSMPP & worker) {
+    this->num_initial_results_ += worker.num_initial_results_;
+    this->num_positive_results_ += worker.num_positive_results_;
+    this->num_negative_results_ += worker.num_negative_results_;
+    this->num_intermediate_results_before_index_check_ += worker.num_intermediate_results_before_index_check_;
+    this->num_intermediate_results_after_index_check_ += worker.num_intermediate_results_after_index_check_;
+    this->num_intermediate_results_after_joinability_check_ += worker.num_intermediate_results_after_joinability_check_;
+    this->num_intermediate_results_after_visit_check_ += worker.num_intermediate_results_after_visit_check_;
+    this->num_intermediate_results_with_empty_candidate_set_ += worker.num_intermediate_results_with_empty_candidate_set_;
+    this->num_intermediate_results_without_results_ += worker.num_intermediate_results_without_results_;
+}
+
+bool CSMPP::ShouldParallelizeFreeVertex(
+    uint queryIndex,
+    uint depth,
+    vertexType currentSearchVertexType,
+    const std::vector<std::pair<uint, uint>> & freezeIndex,
+    size_t candidateCount) const {
+    if(print_enumeration_results_ || reach_time_limit || omp_in_parallel()) {
+        return false;
+    }
+    if(currentSearchVertexType != freeVertex || !freezeIndex.empty()) {
+        return false;
+    }
+    if(candidateCount < kParallelCandidateMinSize || omp_get_max_threads() <= 1) {
+        return false;
+    }
+    if(depth > kParallelCandidateDepthLimit) {
+        return false;
+    }
+    return depth + 1 < this->queryVec[queryIndex].NumVertices();
+}
+
+void CSMPP::SearchFreeVertexCandidates(
+    uint queryIndex,
+    uint edgeIndex,
+    searchType type,
+    uint depth,
+    const std::vector<uint> & candidate) {
+    if(candidate.empty()) {
+        return;
+    }
+
+    if(!ShouldParallelizeFreeVertex(queryIndex, depth, freeVertex, {}, candidate.size())) {
+        for(const auto & data_v : candidate){
+            this->matchVertex(data_v, depth);
+            if(depth == this->queryVec[queryIndex].NumVertices() - 1) {
+                this->addMatchResult(queryIndex, edgeIndex, type);
+            }
+            else {
+                this->searchVertex(queryIndex, edgeIndex, type, depth + 1);
+            }
+            this->popVertex(data_v, depth);
+            if(reach_time_limit) {
+                return;
+            }
+        }
+        return;
+    }
+
+    const int num_threads = std::min<int>(static_cast<int>(candidate.size()), omp_get_max_threads());
+
+    #pragma omp parallel num_threads(num_threads)
+    {
+        CSMPP worker = this->CreateBranchWorker();
+
+        #pragma omp for schedule(dynamic, 1)
+        for(int index = 0; index < static_cast<int>(candidate.size()); index++){
+            if(reach_time_limit){
+                continue;
+            }
+
+            this->CopySearchStateToWorker(worker);
+
+            const auto data_v = candidate[index];
+            worker.matchVertex(data_v, depth);
+            if(depth == worker.queryVec[queryIndex].NumVertices() - 1) {
+                worker.addMatchResult(queryIndex, edgeIndex, type);
+            }
+            else {
+                worker.searchVertex(queryIndex, edgeIndex, type, depth + 1);
+            }
+            worker.popVertex(data_v, depth);
+
+            #pragma omp critical
+            {
+                this->MergeWorkerCounters(worker);
+            }
         }
     }
 }
@@ -980,15 +1152,16 @@ void CSMPP::searchVertex(uint queryIndex, uint edgeIndex, searchType type, uint 
             finish = useAndFinsh;
             if(currentSearchVertexType == freeVertex)
             {
-                for(auto & data_v : this->matchCandidate[cacheStatu])
+                std::vector<uint> candidate;
+                candidate.reserve(this->matchCandidate[cacheStatu].size());
+                for(const auto & data_v : this->matchCandidate[cacheStatu])
                 {
                     if(this->visited_[data_v]) {
                         continue;
                     }
-                    this->matchVertex(data_v, depth);
-                    this->searchVertex(queryIndex, edgeIndex, type, depth + 1);
-                    this->popVertex(data_v, depth);
+                    candidate.emplace_back(data_v);
                 }
+                SearchFreeVertexCandidates(queryIndex, edgeIndex, type, depth, candidate);
             }
             else{
                 if(currentSearchVertexType == isolatedVertex){
@@ -1241,11 +1414,7 @@ void CSMPP::searchVertex(uint queryIndex, uint edgeIndex, searchType type, uint 
                     }
                     if(!part2Candidate.empty()){
                         if(currentSearchVertexType == freeVertex){
-                            for(auto & data_v : part2Candidate){
-                                this->matchVertex(data_v, depth);
-                                this->searchVertex(queryIndex, edgeIndex, type, depth + 1);
-                                this->popVertex(data_v, depth);
-                            }
+                            SearchFreeVertexCandidates(queryIndex, edgeIndex, type, depth, part2Candidate);
                         }
                         else{
                             this->matchVertex(part2Candidate, depth);
@@ -1267,11 +1436,7 @@ void CSMPP::searchVertex(uint queryIndex, uint edgeIndex, searchType type, uint 
                 }
                 else{
                     if(currentSearchVertexType == freeVertex){
-                        for(auto & data_v : this->getItersectionTop(depth)){
-                            this->matchVertex(data_v, depth);
-                            this->searchVertex(queryIndex, edgeIndex, type, depth + 1);
-                            this->popVertex(data_v, depth);
-                        }
+                        SearchFreeVertexCandidates(queryIndex, edgeIndex, type, depth, this->getItersectionTop(depth));
                     }
                     else{
                         this->matchVertex(this->getItersectionTop(depth), depth);
@@ -1297,11 +1462,7 @@ void CSMPP::searchVertex(uint queryIndex, uint edgeIndex, searchType type, uint 
         }
         else{
             if(currentSearchVertexType == freeVertex){
-                for(auto & data_v : candidate){
-                    this->matchVertex(data_v, depth);
-                    this->searchVertex(queryIndex, edgeIndex, type, depth + 1);
-                    this->popVertex(data_v, depth);
-                }
+                SearchFreeVertexCandidates(queryIndex, edgeIndex, type, depth, candidate);
             }
             else{
                 this->matchVertex(candidate, depth);

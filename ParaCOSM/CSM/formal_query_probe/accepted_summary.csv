@@ -1,0 +1,2 @@
+query_name,seed_name,mutation,query_path,vertex_count,edge_count,selected_metric,initial_ms,incremental_ms,initial_matches,positive_matches,negative_matches,edge_updates,timed_out,log_path
+Q_gen_001,Q_21,rewire,/home/v-haibinlai/haibin/ParaCOSM/ParaCOSM/CSM/formal_query_probe/accepted_queries/Q_gen_001,8,7,103408.21875,103408.21875,65256.898438,3427955702,2945577272,0,244341,False,/home/v-haibinlai/haibin/ParaCOSM/ParaCOSM/CSM/formal_query_probe/logs/Q_gen_001.log

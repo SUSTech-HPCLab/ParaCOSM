@@ -1,0 +1,90 @@
+----------- Loading graphs ------------
+# vertices = 7
+# edges = 12
+# vertices = 4847571
+# edges = 38566113
+Load Graphs: 39639.9ms
+------------ Preprocessing ------------
+matching order: 
+-vertex(backward neighbors)-
+#0: 4-0(4)-5(0,4)-6(0,4,5)-3(4,5,6)-2(0,3)-1(4)
+#1: 5-0(5)-4(0,5)-6(0,4,5)-3(4,5,6)-2(0,3)-1(4)
+#2: 5-4(5)-0(4,5)-6(0,4,5)-3(4,5,6)-2(0,3)-1(4)
+#3: 6-0(6)-4(0,6)-5(0,4,6)-3(4,5,6)-2(0,3)-1(4)
+#4: 6-4(6)-0(4,6)-5(0,4,6)-3(4,5,6)-2(0,3)-1(4)
+#5: 6-5(6)-4(5,6)-0(4,5,6)-3(4,5,6)-2(0,3)-1(4)
+#6: 3-4(3)-5(3,4)-6(3,4,5)-0(4,5,6)-2(0,3)-1(4)
+#7: 3-5(3)-4(3,5)-6(3,4,5)-0(4,5,6)-2(0,3)-1(4)
+#8: 3-6(3)-4(3,6)-5(3,4,6)-0(4,5,6)-2(0,3)-1(4)
+#9: 2-0(2)-4(0)-3(2,4)-5(0,3,4)-6(0,3,4,5)-1(4)
+#10: 2-3(2)-4(3)-0(2,4)-5(0,3,4)-6(0,3,4,5)-1(4)
+#11: 1-4(1)-0(4)-5(0,4)-6(0,4,5)-3(4,5,6)-2(0,3)
+
+Preprocessing: 4.81ms
+--------- Incremental Matching --------
+auto_tuning off:0
+use 8 threads for incresemental matching 
+Incremental Matching: 23398.4ms
+0 vertex updates.
+4285124 edge updates.
+8055 unsafe updates.
+369284700 positive matches.
+0 negative matches.
+
+# edges in index in total: 0
+# vertices in index in total: 0
+Peak Virtual Memory: 2601888 KB
+
+----------------- End -----------------
+
+[VV_HIST] total_calls=113239 total_tasks=25607664 avg_tasks/call=226.138
+  vv<=0: 74227 calls (65.549% cumulative)
+  vv<=1: 119 calls (65.6541% cumulative)
+  vv<=2: 213 calls (65.8422% cumulative)
+  vv<=3: 244 calls (66.0576% cumulative)
+  vv<=4: 267 calls (66.2934% cumulative)
+  vv<=5: 322 calls (66.5778% cumulative)
+  vv<=6: 359 calls (66.8948% cumulative)
+  vv<=7: 322 calls (67.1792% cumulative)
+  vv<=8: 377 calls (67.5121% cumulative)
+  vv<=9: 339 calls (67.8114% cumulative)
+  vv<=10: 3616 calls (71.0047% cumulative)
+  vv<=20: 3105 calls (73.7467% cumulative)
+  vv<=30: 2508 calls (75.9615% cumulative)
+  vv<=40: 2124 calls (77.8371% cumulative)
+  vv<=50: 1608 calls (79.2571% cumulative)
+  vv<=60: 1400 calls (80.4935% cumulative)
+  vv<=70: 1160 calls (81.5179% cumulative)
+  vv<=80: 961 calls (82.3665% cumulative)
+  vv<=90: 855 calls (83.1215% cumulative)
+  vv<=100: 5021 calls (87.5555% cumulative)
+  vv<=200: 2459 calls (89.727% cumulative)
+  vv<=300: 1432 calls (90.9916% cumulative)
+  vv<=400: 984 calls (91.8606% cumulative)
+  vv<=500: 830 calls (92.5935% cumulative)
+  vv<=600: 691 calls (93.2038% cumulative)
+  vv<=700: 567 calls (93.7045% cumulative)
+  vv<=800: 447 calls (94.0992% cumulative)
+  vv<=900: 409 calls (94.4604% cumulative)
+  vv<=1000: 2637 calls (96.7891% cumulative)
+  vv<=2000: 1353 calls (97.9839% cumulative)
+  vv<=3000: 721 calls (98.6206% cumulative)
+  vv<=4000: 485 calls (99.0489% cumulative)
+  vv<=5000: 258 calls (99.2768% cumulative)
+  vv<=6000: 227 calls (99.4772% cumulative)
+  vv<=7000: 175 calls (99.6318% cumulative)
+  vv<=8000: 117 calls (99.7351% cumulative)
+  vv<=9000: 105 calls (99.8278% cumulative)
+  vv<=10000: 69 calls (99.8887% cumulative)
+  vv<=11000: 33 calls (99.9179% cumulative)
+  vv<=12000: 22 calls (99.9373% cumulative)
+  vv<=13000: 12 calls (99.9479% cumulative)
+  vv<=14000: 8 calls (99.955% cumulative)
+  vv<=15000: 5 calls (99.9594% cumulative)
+  vv<=16000: 4 calls (99.9629% cumulative)
+  vv<=17000: 6 calls (99.9682% cumulative)
+  vv<=18000: 8 calls (99.9753% cumulative)
+  vv<=19000: 16 calls (99.9894% cumulative)
+  vv<=20000: 5 calls (99.9938% cumulative)
+  vv<=21000: 4 calls (99.9974% cumulative)
+  vv<=28000: 3 calls (100% cumulative)

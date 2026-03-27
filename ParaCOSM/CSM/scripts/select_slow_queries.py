@@ -96,6 +96,11 @@ def parse_args() -> argparse.Namespace:
         help="Threshold in seconds. Queries whose selected metric is at least this value will be selected.",
     )
     parser.add_argument(
+        "--max-seconds",
+        type=float,
+        help="Optional upper bound in seconds for the selected metric.",
+    )
+    parser.add_argument(
         "--metric",
         choices=("initial", "incremental", "total", "max"),
         default="incremental",
@@ -146,6 +151,11 @@ def parse_args() -> argparse.Namespace:
         "--keep-all-logs",
         action="store_true",
         help="Keep logs for all runs. By default only selected queries keep their logs.",
+    )
+    parser.add_argument(
+        "--require-no-timeout",
+        action="store_true",
+        help="Only select query graphs whose run does not report a timeout.",
     )
     return parser.parse_args()
 
@@ -247,6 +257,10 @@ def run_query(args: argparse.Namespace, query_path: Path, logs_dir: Path) -> Que
 
     vertex_count, edge_count = count_query_shape(query_path)
     qualifies = selected_ms is not None and selected_ms >= args.min_seconds * 1000.0
+    if qualifies and args.max_seconds is not None:
+        qualifies = selected_ms <= args.max_seconds * 1000.0
+    if qualifies and args.require_no_timeout:
+        qualifies = not timed_out
 
     log_path = logs_dir / f"{query_path.name}.log"
     if args.keep_all_logs or qualifies:

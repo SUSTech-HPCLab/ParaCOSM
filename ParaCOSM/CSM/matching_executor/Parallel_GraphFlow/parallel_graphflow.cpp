@@ -1318,6 +1318,31 @@ void Parallel_Graphflow::Parallel_FindMatches2(uint order_index, uint depth, std
         m[u] = UNMATCHED;
     }
 
+    // Adaptive: skip parallel when too few tasks — sequential is faster.
+    // Analysis: 50-72% of PFM2 calls have vv<=10 but contribute <6% of tasks.
+    // Dense queries (many edges) have more PFM2 calls with less work each,
+    // making OMP overhead dominate. Use higher threshold for denser queries.
+    const size_t VV_SEQ_THRESHOLD = NUMTHREAD * std::max<size_t>(2,
+        query_.NumEdges() / 3);
+    if (vertex_vector.size() <= VV_SEQ_THRESHOLD) {
+        // Process sequentially: avoid omp overhead entirely
+        for (size_t t_1 = 0; t_1 < vertex_vector.size(); t_1++) {
+            auto& [v3, u_min3, u_min_label3, m2, i2] = vertex_vector[t_1];
+            uint u2 = order_vs_[order_index][depth+1];
+            local_vec_visited_local[0][v3] = true;
+            m2[u2] = v3;
+            ProcessNeighbor(u2, u_min3, u_min_label3,
+                order_index, depth+1, m2,
+                local_num_result[0], i2, 0);
+            local_vec_visited_local[0][v3] = false;
+            m2[u2] = UNMATCHED;
+        }
+        for (size_t i = 0; i < local_num_result.size(); ++i) {
+            num_results += local_num_result[i];
+        }
+        return;
+    }
+
     // if(auto_tuning == 1){
         if(vertex_vector.size() < NUMT){
             if(vertex_vector.size() == 0){
@@ -1504,6 +1529,89 @@ inline bool Parallel_Graphflow::ProcessNeighbor(
     return true;
 }
 
+
+
+/**
+ * @brief Inner version of Parallel_FindMatches2 for use inside existing omp parallel region.
+ * Uses #pragma omp for (not parallel for) + #pragma omp single for expansion.
+ */
+void Parallel_Graphflow::Parallel_FindMatches2_inner(uint order_index, uint depth, std::vector<uint>& m, size_t &num_results)
+{
+    uint u = order_vs_[order_index][depth];
+    uint u_min = NOT_EXIST, u_min_label = NOT_EXIST, u_min_size = UINT_MAX;
+    const auto& q_nbrs = query_.GetNeighbors(u);
+    const auto& q_nbr_labels = query_.GetNeighborLabels(u);
+
+    #pragma omp single
+    {
+        vertex_vector.clear();
+        for (uint i = 0u; i < q_nbrs.size(); i++) {
+            uint uo = q_nbrs[i], ul = q_nbr_labels[i];
+            if (m[uo] == UNMATCHED) continue;
+            uint sz = data_.GetNeighbors(m[uo]).size();
+            if (sz < u_min_size) { u_min_size = sz; u_min = uo; u_min_label = ul; }
+        }
+        if (u_min != NOT_EXIST) {
+            const auto& nbrs = data_.GetNeighbors(m[u_min]);
+            const auto& nlbl = data_.GetNeighborLabels(m[u_min]);
+            for (uint i = 0u; i < nbrs.size(); i++) {
+                uint v = nbrs[i];
+                if (data_.GetVertexLabel(v) != query_.GetVertexLabel(u) || nlbl[i] != u_min_label) continue;
+                bool ok = true;
+                for (uint j = 0u; j < q_nbrs.size(); j++) {
+                    uint uo2 = q_nbrs[j], ul2 = q_nbr_labels[j];
+                    if (m[uo2] == UNMATCHED || uo2 == u_min) continue;
+                    auto it = std::lower_bound(data_.GetNeighbors(m[uo2]).begin(), data_.GetNeighbors(m[uo2]).end(), v);
+                    uint d2 = std::distance(data_.GetNeighbors(m[uo2]).begin(), it);
+                    if (it == data_.GetNeighbors(m[uo2]).end() || *it != v || data_.GetNeighborLabels(m[uo2])[d2] != ul2) { ok = false; break; }
+                }
+                if (!ok || (!homomorphism_ && visited_[v])) continue;
+                m[u] = v; visited_[v] = true;
+                for (size_t t = 0; t < local_vec_visited_local.size(); t++) local_vec_visited_local[t][v] = true;
+                if (depth == query_.NumVertices() - 1) { num_results++; }
+                else {
+                    uint dd = depth + 1, uu2 = order_vs_[order_index][dd];
+                    uint um2 = NOT_EXIST, uml2 = NOT_EXIST, ums2 = UINT_MAX;
+                    const auto& qn2 = query_.GetNeighbors(uu2);
+                    const auto& ql2 = query_.GetNeighborLabels(uu2);
+                    for (uint k = 0; k < qn2.size(); k++) {
+                        if (m[qn2[k]] == UNMATCHED) continue;
+                        uint s2 = data_.GetNeighbors(m[qn2[k]]).size();
+                        if (s2 < ums2) { ums2 = s2; um2 = qn2[k]; uml2 = ql2[k]; }
+                    }
+                    if (um2 != NOT_EXIST) {
+                        const auto& nb2 = data_.GetNeighbors(m[um2]);
+                        for (uint k = 0; k < nb2.size(); k++)
+                            vertex_vector.emplace_back(v, um2, uml2, m, k);
+                    }
+                }
+                for (size_t t = 0; t < local_vec_visited_local.size(); t++) local_vec_visited_local[t][v] = false;
+                visited_[v] = false; m[u] = UNMATCHED;
+            }
+        }
+    } // end omp single (implicit barrier)
+
+    size_t vv_size = vertex_vector.size();
+    if (vv_size == 0) return;
+    uint u2 = order_vs_[order_index][depth + 1];
+    size_t my_results = 0;
+
+    #pragma omp for schedule(dynamic, 1)
+    for (size_t t_1 = 0; t_1 < vv_size; t_1++) {
+        size_t tid = omp_get_thread_num();
+        auto& [v3, um3, uml3, m2, i2] = vertex_vector[t_1];
+        local_vec_visited_local[tid][v3] = true;
+        m2[u2] = v3;
+        ProcessNeighbor(u2, um3, uml3, order_index, depth + 1, m2, my_results, i2, tid);
+        local_vec_visited_local[tid][v3] = false;
+        m2[u2] = UNMATCHED;
+    }
+    // implicit barrier after omp for
+
+    #pragma omp atomic
+    num_results += my_results;
+    #pragma omp barrier
+}
 
 
 /**
@@ -2659,6 +2767,87 @@ void Parallel_Graphflow::AddEdge(uint v1, uint v2, uint label)
     num_positive_results_ += num_results;
 }
 
+// ---------------------------------------------------------------------------
+// Batch-all helpers: thread-safe enumeration without graph mutation
+// ---------------------------------------------------------------------------
+
+void Parallel_Graphflow::PrepareBatchEnumeration(size_t num_threads)
+{
+    const size_t nv = data_.NumVertices();
+    // Ensure we have enough per-thread visited / m arrays
+    if (local_vec_visited_local.size() < num_threads) {
+        local_vec_visited_local.resize(num_threads, std::vector<bool>(nv, false));
+    }
+    // Also make sure each existing array is large enough (graph may have grown)
+    for (size_t t = 0; t < local_vec_visited_local.size(); t++) {
+        if (local_vec_visited_local[t].size() < nv)
+            local_vec_visited_local[t].resize(nv, false);
+    }
+    if (local_vec_m.size() < num_threads) {
+        local_vec_m.resize(num_threads, std::vector<uint>(query_.NumVertices(), UNMATCHED));
+    }
+}
+
+size_t Parallel_Graphflow::EnumerateNewEdge(uint v1, uint v2, uint label, size_t thread_id)
+{
+    if (max_num_results_ == 0) return 0;
+
+    // Use the per-thread m vector (reset it first)
+    auto& m = local_vec_m[thread_id];
+    std::fill(m.begin(), m.end(), UNMATCHED);
+
+    size_t num_results = 0;
+
+    for (uint i = 0; i < query_.NumEdges(); i++)
+    {
+        uint u1 = order_vs_[i][0], u2 = order_vs_[i][1];
+        auto temp_q_labels = query_.GetEdgeLabel(u1, u2);
+
+        // check v1 → v2
+        if (
+            std::get<0>(temp_q_labels) == data_.GetVertexLabel(v1) &&
+            std::get<1>(temp_q_labels) == data_.GetVertexLabel(v2) &&
+            std::get<2>(temp_q_labels) == label
+        ) {
+            m[u1] = v1;
+            m[u2] = v2;
+            local_vec_visited_local[thread_id][v1] = true;
+            local_vec_visited_local[thread_id][v2] = true;
+
+            FindMatches_local(i, 2, m, num_results, thread_id);
+
+            local_vec_visited_local[thread_id][v1] = false;
+            local_vec_visited_local[thread_id][v2] = false;
+            m[u1] = UNMATCHED;
+            m[u2] = UNMATCHED;
+
+            if (num_results >= max_num_results_ || reach_time_limit) break;
+        }
+
+        // check v2 → v1
+        if (
+            std::get<0>(temp_q_labels) == data_.GetVertexLabel(v2) &&
+            std::get<1>(temp_q_labels) == data_.GetVertexLabel(v1) &&
+            std::get<2>(temp_q_labels) == label
+        ) {
+            m[u1] = v2;
+            m[u2] = v1;
+            local_vec_visited_local[thread_id][v2] = true;
+            local_vec_visited_local[thread_id][v1] = true;
+
+            FindMatches_local(i, 2, m, num_results, thread_id);
+
+            local_vec_visited_local[thread_id][v2] = false;
+            local_vec_visited_local[thread_id][v1] = false;
+            m[u1] = UNMATCHED;
+            m[u2] = UNMATCHED;
+
+            if (num_results >= max_num_results_ || reach_time_limit) break;
+        }
+    }
+    return num_results;
+}
+
 void Parallel_Graphflow::AddEdgeWithSubflow(uint v1, uint v2, uint label, tf::Subflow& sf)
 {
     data_.AddEdge(v1, v2, label);
@@ -2975,4 +3164,165 @@ void Parallel_Graphflow::GetMemoryCost(size_t &num_edges, size_t &num_vertices)
 {
     num_edges = 0ul;
     num_vertices = 0ul;
+}
+
+
+/**
+ * @brief Single-OMP-region persistent parallel update loop.
+ *
+ * ONE #pragma omp parallel for the entire update stream (~244K updates).
+ * Inside:
+ *   - #pragma omp for: parallel Classify (all threads classify simultaneously)
+ *   - #pragma omp single: find first unsafe, apply vertex-adds, setup AddEdge
+ *   - Parallel_FindMatches2_inner: #pragma omp for on vertex_vector (same team)
+ * 
+ * Zero extra fork/join: threads are created once and reused for both
+ * classification and matching.
+ */
+void Parallel_Graphflow::PersistentParallelUpdate(
+    Graph& data_graph,
+    size_t& num_v_updates, size_t& num_e_updates,
+    size_t& unsafe_updates,
+    size_t& positive_num_results_last,
+    size_t& negative_num_results_last)
+{
+    const size_t WINDOW = 64;
+    const size_t update_size = data_graph.updates_vec_.size();
+
+    std::vector<uint8_t> slot_safe(WINDOW, 0);
+    size_t sliding_window_base = 0;
+    size_t first_unsafe = 0;
+
+    #pragma omp parallel num_threads(NUMTHREAD)
+    {
+        while (sliding_window_base < update_size)
+        {
+            size_t actual = std::min(WINDOW, update_size - sliding_window_base);
+
+            // Phase 1 (single): apply vertex-adds so Classify sees them
+            #pragma omp single
+            {
+                for (size_t i = 0; i < actual; i++) {
+                    const auto& u = data_graph.updates_vec_[i + sliding_window_base];
+                    if (u.type == 'v' && u.is_add) {
+                        AddVertex(u.id1, u.label);
+                        slot_safe[i] = 1; // safe
+                    } else if (u.type == 'v' && !u.is_add) {
+                        slot_safe[i] = 2; // unsafe
+                    } else {
+                        slot_safe[i] = 0; // needs classify
+                    }
+                }
+            }
+            // implicit barrier
+
+            // Phase 2 (parallel): classify edge updates
+            #pragma omp for schedule(static)
+            for (size_t i = 0; i < actual; i++) {
+                if (slot_safe[i] != 0) continue;
+                const auto& u = data_graph.updates_vec_[i + sliding_window_base];
+                bool safe = Classify(u.id1, u.id2, u.label);
+                slot_safe[i] = safe ? 1 : 2;
+            }
+            // implicit barrier
+
+            // Phase 3 (single): find first unsafe
+            #pragma omp single
+            {
+                first_unsafe = actual;
+                for (size_t i = 0; i < actual; i++) {
+                    if (slot_safe[i] == 2) { first_unsafe = i; break; }
+                }
+            }
+            // implicit barrier: all threads see first_unsafe
+
+            if (first_unsafe < actual)
+            {
+                const auto& ins = data_graph.updates_vec_[first_unsafe + sliding_window_base];
+
+                if (ins.type == 'e' && ins.is_add)
+                {
+                    // Single thread: AddEdge to data graph
+                    #pragma omp single
+                    { data_.AddEdge(ins.id1, ins.id2, ins.label); }
+
+                    // Inline AddEdge matching logic
+                    std::vector<uint> m(query_.NumVertices(), UNMATCHED);
+                    size_t edge_results = 0;
+
+                    for (uint qi = 0; qi < query_.NumEdges(); qi++)
+                    {
+                        uint u1 = order_vs_[qi][0], u2 = order_vs_[qi][1];
+                        auto tql = query_.GetEdgeLabel(u1, u2);
+
+                        // Try both orientations
+                        for (int orient = 0; orient < 2; orient++)
+                        {
+                            uint dv1 = (orient == 0) ? ins.id1 : ins.id2;
+                            uint dv2 = (orient == 0) ? ins.id2 : ins.id1;
+
+                            if (std::get<0>(tql) != data_.GetVertexLabel(dv1) ||
+                                std::get<1>(tql) != data_.GetVertexLabel(dv2) ||
+                                std::get<2>(tql) != ins.label) continue;
+
+                            #pragma omp single
+                            {
+                                m[u1] = dv1; m[u2] = dv2;
+                                visited_[dv1] = true; visited_[dv2] = true;
+                                for (size_t t = 0; t < local_vec_visited_local.size(); t++) {
+                                    local_vec_visited_local[t][dv1] = true;
+                                    local_vec_visited_local[t][dv2] = true;
+                                }
+                            }
+
+                            // All threads: parallel FindMatches (inner version)
+                            Parallel_FindMatches2_inner(qi, 2, m, edge_results);
+
+                            #pragma omp single
+                            {
+                                for (size_t t = 0; t < local_vec_visited_local.size(); t++) {
+                                    local_vec_visited_local[t][dv1] = false;
+                                    local_vec_visited_local[t][dv2] = false;
+                                }
+                                visited_[dv1] = false; visited_[dv2] = false;
+                                m[u1] = UNMATCHED; m[u2] = UNMATCHED;
+                            }
+
+                            if (edge_results >= max_num_results_ || reach_time_limit) break;
+                        }
+                        if (edge_results >= max_num_results_ || reach_time_limit) break;
+                    }
+
+                    #pragma omp single
+                    { num_positive_results_ += edge_results; }
+                }
+                else if (ins.type == 'v' && !ins.is_add)
+                {
+                    #pragma omp single
+                    { RemoveVertex(ins.id1); }
+                }
+
+                #pragma omp single
+                {
+                    sliding_window_base += first_unsafe + 1;
+                    num_e_updates += first_unsafe + 1;
+
+                    size_t pc = 0, nc = 0;
+                    GetNumPositiveResults(pc); GetNumNegativeResults(nc);
+                    if (pc != positive_num_results_last || nc != negative_num_results_last) {
+                        positive_num_results_last = pc; negative_num_results_last = nc;
+                        unsafe_updates++;
+                    }
+                }
+            }
+            else
+            {
+                #pragma omp single
+                {
+                    sliding_window_base += actual;
+                    num_e_updates += actual;
+                }
+            }
+        } // end while
+    } // end omp parallel — threads destroyed here, once
 }

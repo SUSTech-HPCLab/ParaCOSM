@@ -101,6 +101,11 @@ def parse_args() -> argparse.Namespace:
         help="Keep only queries whose selected runtime is at least this threshold in seconds.",
     )
     parser.add_argument(
+        "--max-seconds",
+        type=float,
+        help="Optional upper bound in seconds for the selected runtime.",
+    )
+    parser.add_argument(
         "--metric",
         choices=("initial", "incremental", "total", "max"),
         default="max",
@@ -152,6 +157,11 @@ def parse_args() -> argparse.Namespace:
         "--keep-all-logs",
         action="store_true",
         help="Keep logs for all generated candidates, not only the accepted ones.",
+    )
+    parser.add_argument(
+        "--require-no-timeout",
+        action="store_true",
+        help="Accept only generated queries that do not report a timeout during validation.",
     )
     return parser.parse_args()
 
@@ -317,12 +327,14 @@ def make_validator_args(args: argparse.Namespace) -> SimpleNamespace:
         update_graph=args.update_graph,
         metric=args.metric,
         min_seconds=args.min_seconds,
+        max_seconds=args.max_seconds,
         threads=args.threads,
         time_limit=args.time_limit,
         initial_time_limit=args.initial_time_limit,
         run_timeout=args.run_timeout,
         report_initial=args.report_initial,
         keep_all_logs=args.keep_all_logs,
+        require_no_timeout=args.require_no_timeout,
     )
 
 
