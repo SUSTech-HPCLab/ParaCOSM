@@ -80,6 +80,11 @@ void matching::PrepareBatchEnumeration(size_t /*num_threads*/)
     // Default: nothing to prepare
 }
 
+void matching::UpdateIndexForEdge(uint /*v1*/, uint /*v2*/, uint /*label*/)
+{
+    // Default: no-op (algorithms without auxiliary indices)
+}
+
 void matching::GetNumInitialResults(size_t &num_initial_results)
 {
     num_initial_results = num_initial_results_;

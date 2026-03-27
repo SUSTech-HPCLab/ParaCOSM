@@ -2171,6 +2171,160 @@ void Parallel_TurboFlux::AddEdge(uint v1, uint v2, uint label)
     num_positive_results_ += num_results;
 }
 
+// ---------------------------------------------------------------------------
+// batch_all support: UpdateIndexForEdge + EnumerateNewEdge + PrepareBatchEnumeration
+// ---------------------------------------------------------------------------
+
+void Parallel_TurboFlux::UpdateIndexForEdge(uint v1, uint v2, uint label)
+{
+    // DCS index update — extracted from the first half of AddEdge().
+    // Edge is already in data graph. Only updates DCS_, d1, d2, n2, Q1, Q2.
+    for (uint u1 = 0; u1 < query_.NumVertices(); u1++)
+    if (data_.GetVertexLabel(v1) == query_.GetVertexLabel(u1))
+    {
+    for (uint u2 = 0; u2 < query_.NumVertices(); u2++)
+    if (data_.GetVertexLabel(v2) == query_.GetVertexLabel(u2))
+    {
+        if (std::get<2>(query_.GetEdgeLabel(u1, u2)) != label) continue;
+
+        bool reversed = false;
+        if (std::find(treeNode_[u1].backwards_.begin(), treeNode_[u1].backwards_.end(), u2) != treeNode_[u1].backwards_.end())
+        {
+            std::swap(u1, u2);
+            std::swap(v1, v2);
+            reversed = true;
+        }
+        if (std::find(treeNode_[u2].backwards_.begin(), treeNode_[u2].backwards_.end(), u1) != treeNode_[u2].backwards_.end())
+        {
+            auto it = std::lower_bound(DCS_[eidx_[u1][u2]][v1].begin(), DCS_[eidx_[u1][u2]][v1].end(), v2);
+            DCS_[eidx_[u1][u2]][v1].insert(it, v2);
+            it = std::lower_bound(DCS_[eidx_[u2][u1]][v2].begin(), DCS_[eidx_[u2][u1]][v2].end(), v1);
+            DCS_[eidx_[u2][u1]][v2].insert(it, v1);
+
+            bool old_p_d1 = d1[u1][v1], old_p_d2 = d2[u1][v1], old_c_d2 = d2[u2][v2];
+
+            if (old_p_d1)
+                InsertionTopDown(u1, u2, v1, v2);
+            if (old_c_d2)
+                InsertionBottomUp(u2, u1, v2, v1);
+            if (old_p_d2)
+                n2[eidx_[u2][u1]][v2] += 1;
+
+            while (!Q1.empty())
+            {
+                auto [u_queue, v_queue] = Q1.front();
+                Q1.pop();
+                for (auto& u_c_queue : treeNode_[u_queue].forwards_)
+                for (auto& v_c_queue : DCS_[eidx_[u_queue][u_c_queue]][v_queue])
+                    InsertionTopDown(u_queue, u_c_queue, v_queue, v_c_queue);
+            }
+            while (!Q2.empty())
+            {
+                auto [u_queue, v_queue] = Q2.front();
+                Q2.pop();
+                for (auto& u_p_queue : treeNode_[u_queue].backwards_)
+                for (auto& v_p_queue : DCS_[eidx_[u_queue][u_p_queue]][v_queue])
+                    InsertionBottomUp(u_queue, u_p_queue, v_queue, v_p_queue);
+                for (auto& u_c_queue : treeNode_[u_queue].forwards_)
+                for (auto& v_c_queue : DCS_[eidx_[u_queue][u_c_queue]][v_queue])
+                    n2[eidx_[u_c_queue][u_queue]][v_c_queue] += 1;
+            }
+        }
+        if (reversed)
+        {
+            std::swap(u1, u2);
+            std::swap(v1, v2);
+        }
+    }
+    }
+}
+
+void Parallel_TurboFlux::PrepareBatchEnumeration(size_t num_threads)
+{
+    const size_t nv = data_.NumVertices();
+    if (local_vec_visited_local.size() < num_threads) {
+        local_vec_visited_local.resize(num_threads, std::vector<bool>(nv, false));
+    }
+    for (size_t t = 0; t < local_vec_visited_local.size(); t++) {
+        if (local_vec_visited_local[t].size() < nv)
+            local_vec_visited_local[t].resize(nv, false);
+    }
+    if (local_vec_m.size() < num_threads) {
+        local_vec_m.resize(num_threads, std::vector<uint>(query_.NumVertices(), UNMATCHED));
+    }
+}
+
+size_t Parallel_TurboFlux::EnumerateNewEdge(uint v1, uint v2, uint label, size_t thread_id)
+{
+    if (max_num_results_ == 0) return 0;
+
+    auto& m = local_vec_m[thread_id];
+    std::fill(m.begin(), m.end(), UNMATCHED);
+
+    size_t num_results = 0;
+
+    for (uint u1 = 0; u1 < query_.NumVertices(); u1++)
+    if (data_.GetVertexLabel(v1) == query_.GetVertexLabel(u1))
+    {
+    for (uint u2 = 0; u2 < query_.NumVertices(); u2++)
+    if (data_.GetVertexLabel(v2) == query_.GetVertexLabel(u2))
+    {
+        if (std::get<2>(query_.GetEdgeLabel(u1, u2)) != label) continue;
+
+        bool reversed = false;
+        if (std::find(treeNode_[u1].backwards_.begin(), treeNode_[u1].backwards_.end(), u2) != treeNode_[u1].backwards_.end())
+        {
+            std::swap(u1, u2);
+            std::swap(v1, v2);
+            reversed = true;
+        }
+        // Case 1: u1 is parent of u2 in spanning tree
+        if (std::find(treeNode_[u2].backwards_.begin(), treeNode_[u2].backwards_.end(), u1) != treeNode_[u2].backwards_.end()
+            && d2[u1][v1] == 1 && d2[u2][v2] == 1)
+        {
+            m[u1] = v1;
+            m[u2] = v2;
+            local_vec_visited_local[thread_id][v1] = true;
+            local_vec_visited_local[thread_id][v2] = true;
+
+            FindMatches_local(eidx_[u2][u1], 2, m, num_results, thread_id);
+
+            local_vec_visited_local[thread_id][v1] = false;
+            local_vec_visited_local[thread_id][v2] = false;
+            m[u1] = UNMATCHED;
+            m[u2] = UNMATCHED;
+
+            if (num_results >= max_num_results_ || reach_time_limit) goto DONE;
+        }
+        // Case 2: non-tree edge
+        if (std::find(treeNode_[u1].backwards_.begin(), treeNode_[u1].backwards_.end(), u2) == treeNode_[u1].backwards_.end()
+            && std::find(treeNode_[u2].backwards_.begin(), treeNode_[u2].backwards_.end(), u1) == treeNode_[u2].backwards_.end())
+        {
+            m[u1] = v1;
+            m[u2] = v2;
+            local_vec_visited_local[thread_id][v1] = true;
+            local_vec_visited_local[thread_id][v2] = true;
+
+            FindMatches_local(eidx_[std::min(u1, u2)][std::max(u1, u2)], 2, m, num_results, thread_id);
+
+            local_vec_visited_local[thread_id][v1] = false;
+            local_vec_visited_local[thread_id][v2] = false;
+            m[u1] = UNMATCHED;
+            m[u2] = UNMATCHED;
+
+            if (num_results >= max_num_results_ || reach_time_limit) goto DONE;
+        }
+        if (reversed)
+        {
+            std::swap(u1, u2);
+            std::swap(v1, v2);
+        }
+    }
+    }
+    DONE:
+    return num_results;
+}
+
 
 /**
  * @brief Removes an edge from the data graph and updates the internal structures.

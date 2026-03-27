@@ -92,6 +92,11 @@ public:
     void RemoveEdge(uint v1, uint v2) override;
     void AddVertex(uint id, uint label) override;
     void RemoveVertex(uint id) override;
+
+    // batch_all support
+    size_t EnumerateNewEdge(uint v1, uint v2, uint label, size_t thread_id) override;
+    void PrepareBatchEnumeration(size_t num_threads) override;
+    void UpdateIndexForEdge(uint v1, uint v2, uint label) override;
     
     void GetMemoryCost(size_t &num_edges, size_t &num_vertices) override;
 

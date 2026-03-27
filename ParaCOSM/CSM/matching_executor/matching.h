@@ -77,6 +77,14 @@ public:
      */
     virtual void PrepareBatchEnumeration(size_t num_threads);
 
+    /**
+     * @brief Update internal index structures for an edge already in the graph.
+     * Called serially before parallel EnumerateNewEdge. For algorithms like
+     * TurboFlux/SymBi that maintain auxiliary indices (DCS, etc.).
+     * Default: no-op (GraphFlow doesn't need index updates).
+     */
+    virtual void UpdateIndexForEdge(uint v1, uint v2, uint label);
+
     // get execution info
     void GetNumInitialResults(size_t &num_initial_results);
     void GetNumPositiveResults(size_t &num_positive_results);

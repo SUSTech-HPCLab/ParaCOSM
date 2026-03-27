@@ -1174,9 +1174,12 @@ void InterExecutor::BatchUpdates_AllAtOnce(
               << "  (safe skipped: " << (update_size - unsafe_edges.size() - num_v_updates)
               << ")" << std::endl;
 
-    // ---- Phase 2: Add ALL unsafe edges to data graph (serial, fast) ----
+    // ---- Phase 2: Add ALL unsafe edges to data graph + update indices (serial) ----
     for (const auto& e : unsafe_edges) {
         data_graph_.AddEdge(e.v1, e.v2, e.label);
+        // Update algorithm-specific index structures (DCS for TurboFlux, etc.)
+        // No-op for GraphFlow which has no auxiliary indices.
+        matching_instance_->UpdateIndexForEdge(e.v1, e.v2, e.label);
     }
 
     // ---- Phase 3: Prepare per-thread state for parallel enumeration ----
