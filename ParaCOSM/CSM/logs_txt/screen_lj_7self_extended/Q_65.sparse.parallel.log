@@ -1,0 +1,35 @@
+----------- Loading graphs ------------
+# vertices = 7
+# edges = 8
+# vertices = 4847571
+# edges = 38566113
+Load Graphs: 40960ms
+------------ Preprocessing ------------
+matching order: 
+-vertex(backward neighbors)-
+#0: 3-4(3)-5(3,4)-6(4,5)-1(3)-2(1)-0(2)
+#1: 5-3(5)-4(3,5)-6(4,5)-1(3)-2(1)-0(2)
+#2: 5-4(5)-3(4,5)-6(4,5)-1(3)-2(1)-0(2)
+#3: 6-4(6)-5(4,6)-3(4,5)-1(3)-2(1)-0(2)
+#4: 6-5(6)-4(5,6)-3(4,5)-1(3)-2(1)-0(2)
+#5: 1-3(1)-4(3)-5(3,4)-6(4,5)-2(1)-0(2)
+#6: 2-1(2)-3(1)-4(3)-5(3,4)-6(4,5)-0(2)
+#7: 0-2(0)-1(2)-3(1)-4(3)-5(3,4)-6(4,5)
+
+Preprocessing: 5.125ms
+--------- Incremental Matching --------
+auto_tuning off:0
+use 8 threads for incresemental matching 
+Start with 4285124 Update
+Incremental Matching: 34218ms
+0 vertex updates.
+4285124 edge updates.
+14445 unsafe updates.
+462952156 positive matches.
+0 negative matches.
+
+# edges in index in total: 0
+# vertices in index in total: 0
+Peak Virtual Memory: 2318996 KB
+
+----------------- End -----------------
