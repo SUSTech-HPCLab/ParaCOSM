@@ -193,9 +193,9 @@ private:
         , size_t thread_id
     );
 
-    void FindMatches_local_m(uint order_index, uint depth, std::vector<uint> m, size_t &num_results);
+    void FindMatches_local_m(uint order_index, uint depth, std::vector<uint>& m, size_t &num_results);
 
-    void FindMatches_local(uint order_index, uint depth, std::vector<uint> m, size_t &num_results, size_t thread_id);
+    void FindMatches_local(uint order_index, uint depth, std::vector<uint>& m, size_t &num_results, size_t thread_id);
 
     // Work-splitting version: splits large subtrees into steal_queue_
     void FindMatches_local_splitting(uint order_index, uint depth,

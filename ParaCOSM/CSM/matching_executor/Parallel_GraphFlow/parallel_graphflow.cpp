@@ -1872,7 +1872,7 @@ inline bool Parallel_Graphflow::ProcessCandidate(
  * The function uses efficient neighborhood intersection through binary search to
  * ensure consistency between vertex connections in the match.
  */
-void Parallel_Graphflow::FindMatches_local(uint order_index, uint depth, std::vector<uint> m, size_t &num_results, size_t thread_id)
+void Parallel_Graphflow::FindMatches_local(uint order_index, uint depth, std::vector<uint>& m, size_t &num_results, size_t thread_id)
 {
     // if (reach_time_limit) return;
 
@@ -2454,7 +2454,7 @@ inline bool Parallel_Graphflow::ProcessNeighbor_queue(
  * The function uses efficient neighborhood intersection through binary search to
  * ensure consistency between vertex connections in the match.
  */
-void Parallel_Graphflow::FindMatches_local_m(uint order_index, uint depth, std::vector<uint> m, size_t &num_results)
+void Parallel_Graphflow::FindMatches_local_m(uint order_index, uint depth, std::vector<uint>& m, size_t &num_results)
 {
     // if (reach_time_limit) return;
 
