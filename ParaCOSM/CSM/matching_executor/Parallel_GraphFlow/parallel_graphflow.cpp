@@ -1295,9 +1295,6 @@ void Parallel_Graphflow::Parallel_FindMatches2(uint order_index, uint depth, std
 
             m[u] = v;
             visited_[v] = true;
-            for (size_t i5 = 0; i5 < local_vec_visited_local.size(); i5++) {
-                local_vec_visited_local[i5][v] = true;
-            }
 
             if (depth == query_.NumVertices() - 1) {
                 num_results++;
@@ -1340,9 +1337,6 @@ void Parallel_Graphflow::Parallel_FindMatches2(uint order_index, uint depth, std
                 }
             }
 
-            for (size_t i5 = 0; i5 < local_vec_visited_local.size(); i5++) {
-                local_vec_visited_local[i5][v] = false;
-            }
             visited_[v] = false;
             m[u] = UNMATCHED;
         }
@@ -1395,9 +1389,6 @@ void Parallel_Graphflow::Parallel_FindMatches2(uint order_index, uint depth, std
         // 4. add a vertex mapping
         m[u] = v;
         visited_[v] = true;
-        for(size_t i5 = 0; i5< local_vec_visited_local.size(); i5++){
-            local_vec_visited_local[i5][v] = true;
-        }
 
         if (depth == query_.NumVertices() - 1)
         {
@@ -1447,10 +1438,6 @@ void Parallel_Graphflow::Parallel_FindMatches2(uint order_index, uint depth, std
             }
         }
 
-
-        for(size_t i5 = 0; i5< local_vec_visited_local.size(); i5++){
-            local_vec_visited_local[i5][v] = false;
-        }
         visited_[v] = false;
         m[u] = UNMATCHED;
     }
@@ -1473,6 +1460,11 @@ void Parallel_Graphflow::Parallel_FindMatches2(uint order_index, uint depth, std
             auto& my_m = tl_m_[0];
             std::copy(m.begin(), m.end(), my_m.begin());
             my_m[grp.u] = grp.v;
+            // Set visited for all mapped vertices
+            for (uint vi = 0; vi < static_cast<uint>(my_m.size()); vi++) {
+                if (my_m[vi] != UNMATCHED)
+                    local_vec_visited_local[0][my_m[vi]] = true;
+            }
             local_vec_visited_local[0][grp.v] = true;
 
             for (size_t li = 0; li < grp.count; li++) {
@@ -1482,6 +1474,11 @@ void Parallel_Graphflow::Parallel_FindMatches2(uint order_index, uint depth, std
                     local_num_result[0], i2, 0);
             }
 
+            // Unset all visited
+            for (uint vi = 0; vi < static_cast<uint>(my_m.size()); vi++) {
+                if (my_m[vi] != UNMATCHED)
+                    local_vec_visited_local[0][my_m[vi]] = false;
+            }
             local_vec_visited_local[0][grp.v] = false;
             my_m[grp.u] = UNMATCHED;
         }
@@ -1508,6 +1505,13 @@ void Parallel_Graphflow::Parallel_FindMatches2(uint order_index, uint depth, std
         auto& my_m = tl_m_[thread_id];
         std::copy(m.begin(), m.end(), my_m.begin());
         my_m[grp.u] = grp.v;
+
+        // Set visited for all already-mapped vertices + this group's vertex
+        // (replaces expensive broadcast from AddEdge)
+        for (uint vi = 0; vi < static_cast<uint>(my_m.size()); vi++) {
+            if (my_m[vi] != UNMATCHED)
+                local_vec_visited_local[thread_id][my_m[vi]] = true;
+        }
         local_vec_visited_local[thread_id][grp.v] = true;
 
         // Process all layer-2 tasks in this group
@@ -1518,6 +1522,11 @@ void Parallel_Graphflow::Parallel_FindMatches2(uint order_index, uint depth, std
                 local_num_result[thread_id], i2, thread_id);
         }
 
+        // Unset visited for all mapped vertices in this group
+        for (uint vi = 0; vi < static_cast<uint>(my_m.size()); vi++) {
+            if (my_m[vi] != UNMATCHED)
+                local_vec_visited_local[thread_id][my_m[vi]] = false;
+        }
         local_vec_visited_local[thread_id][grp.v] = false;
         my_m[grp.u] = UNMATCHED;
     }
@@ -2799,7 +2808,9 @@ void Parallel_Graphflow::AddEdge(uint v1, uint v2, uint label)
     gpu_search_csr_dirty_ = true;
     gpu_search_dirty_edges_.push_back({v1, v2});
 
-    std::vector<uint> m(query_.NumVertices(), UNMATCHED);
+    // Reuse pre-allocated tl_m_[0] instead of heap-allocating a new vector
+    auto& m = tl_m_[0];
+    std::fill(m.begin(), m.end(), UNMATCHED);
 
     if (max_num_results_ == 0) return;
 
@@ -2820,18 +2831,7 @@ void Parallel_Graphflow::AddEdge(uint v1, uint v2, uint label)
             visited_[v1] = true;
             visited_[v2] = true;
 
-            
-            for(size_t i = 0; i< local_vec_visited_local.size(); i++){
-                local_vec_visited_local[i][v1] = true;
-                local_vec_visited_local[i][v2] = true; 
-            }
-
             taskflow_findmatches_layer(i, 2, m, num_results);
-
-            for(size_t i = 0; i< local_vec_visited_local.size(); i++){
-                local_vec_visited_local[i][v1] = false;
-                local_vec_visited_local[i][v2] = false; 
-            }
 
             visited_[v1] = false;
             visited_[v2] = false;
@@ -2852,17 +2852,7 @@ void Parallel_Graphflow::AddEdge(uint v1, uint v2, uint label)
             visited_[v2] = true;
             visited_[v1] = true;
 
-            for(size_t i = 0; i< local_vec_visited_local.size(); i++){
-                local_vec_visited_local[i][v1] = true;
-                local_vec_visited_local[i][v2] = true; 
-            }
-
             taskflow_findmatches_layer(i, 2, m, num_results);
-
-            for(size_t i = 0; i< local_vec_visited_local.size(); i++){
-                local_vec_visited_local[i][v1] = false;
-                local_vec_visited_local[i][v2] = false; 
-            }
 
             visited_[v2] = false;
             visited_[v1] = false;

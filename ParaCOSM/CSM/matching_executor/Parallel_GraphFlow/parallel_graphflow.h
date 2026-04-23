@@ -53,6 +53,19 @@ private:
     // Thread-local pre-allocated m vectors (avoids heap allocation per task)
     std::vector<std::vector<uint>> tl_m_;  // [max_threads][query_vertices]
 
+    // Precomputed u_min info per (order_index, depth) to avoid re-deriving in FindMatches_local.
+    // precomp_u_min_[order_index][depth] = (u_min_query_neighbor_index, u_min_query_vertex)
+    // Computed during GenerateMatchingOrder; NOT valid when mapping changes candidate sizes.
+    // For Graphflow u_min depends on runtime m[] mapping, so we cache query topology only.
+    // order_nbr_of_[order_index][depth] = list of query neighbors of order_vs_[order_index][depth]
+    //   that appear BEFORE depth in the order (i.e., already matched)
+    struct DepthNbrInfo {
+        uint u;           // query vertex at this depth
+        std::vector<uint> matched_nbrs;       // q_nbrs indices where m[q_nbrs[j]] != UNMATCHED
+        std::vector<uint> matched_nbr_labels; // corresponding edge labels
+    };
+    std::vector<std::vector<DepthNbrInfo>> order_depth_info_; // [order_index][depth]
+
     struct StealWork {
         std::vector<uint> m;
         std::vector<uint> ancestors;
