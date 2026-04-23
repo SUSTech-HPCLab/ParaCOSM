@@ -71,6 +71,9 @@ public:
      */
     virtual size_t EnumerateNewEdge(uint v1, uint v2, uint label, size_t thread_id);
 
+    virtual size_t EnumerateNewEdgeVersioned(uint v1, uint v2, uint label,
+                                              size_t thread_id, uint max_timestamp);
+
     /**
      * @brief Prepare per-thread state for EnumerateNewEdge batch calls.
      * @param num_threads  Number of threads that will call EnumerateNewEdge concurrently

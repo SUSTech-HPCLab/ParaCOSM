@@ -114,6 +114,7 @@ set(SRC_FILES
     core/gpu/gpu_classifier.cu
     core/gpu/gpu_candidate_filter.cu
     core/gpu/gpu_search.cu
+    core/gpu/gpu_bfs_search.cu
 )
 
 # -----------------------------

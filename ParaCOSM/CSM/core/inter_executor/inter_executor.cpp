@@ -3,6 +3,7 @@
 #include <iostream>
 #include <thread>
 #include <functional>
+#include <unordered_set>
 #include <immintrin.h>
 #include <omp.h>
 #include "inter_executor.h"
@@ -1114,6 +1115,250 @@ void InterExecutor::BatchUpdates_Persistent(
 }
 
 // ===========================================================================
+// BatchUpdates_Pipelined
+//
+// Pipelined classify caching + prefetch + adaptive window.
+// ===========================================================================
+
+void InterExecutor::BatchUpdates_Pipelined(
+    size_t& num_v_updates,
+    size_t& num_e_updates,
+    size_t& unsafe_updates,
+    size_t& count,
+    size_t& positive_num_results_last,
+    size_t& negative_num_results_last,
+    std::atomic_bool& reach_time_limit,
+    size_t num_threads
+) {
+    const size_t MIN_WINDOW = 64;
+    const size_t MAX_WINDOW = 1024;
+    size_t window_size = 128; // initial, will adapt
+    const size_t update_size = data_graph_.updates_vec_.size();
+    if (update_size == 0) return;
+    if (num_threads < 2) num_threads = 2;
+    const size_t classify_threads = num_threads - 1;
+
+    // ---- Global classify cache across windows ----
+    // 0 = not classified, 1 = safe, 2 = unsafe
+    std::vector<uint8_t> classify_cache(update_size, 0);
+
+    // ---- Persistent classify thread pool (same design as BatchUpdates_Persistent) ----
+    std::atomic<size_t> pool_next{0};
+    std::atomic<size_t> pool_done{0};
+    size_t pool_count = 0;
+    size_t pool_base = 0;
+    std::atomic<uint64_t> pool_epoch{0};
+    std::atomic<bool> pool_stop{false};
+
+    // Pointer to cache so workers can write to it
+    uint8_t* cache_ptr = classify_cache.data();
+
+    auto worker_fn = [&](size_t /*tid*/) {
+        uint64_t last_epoch = 0;
+        while (!pool_stop.load(std::memory_order_relaxed)) {
+            uint64_t cur = pool_epoch.load(std::memory_order_acquire);
+            if (cur == last_epoch) { _mm_pause(); continue; }
+            last_epoch = cur;
+            while (true) {
+                size_t idx = pool_next.fetch_add(1, std::memory_order_relaxed);
+                if (idx >= pool_count) break;
+                size_t global_idx = idx + pool_base;
+                // Skip if already cached (from prefetch or previous window)
+                if (cache_ptr[global_idx] != 0) {
+                    pool_done.fetch_add(1, std::memory_order_release);
+                    continue;
+                }
+                const auto& update = data_graph_.updates_vec_[global_idx];
+                bool safe = matching_instance_->Classify(update.id1, update.id2, update.label);
+                cache_ptr[global_idx] = safe ? 1 : 2;
+                pool_done.fetch_add(1, std::memory_order_release);
+            }
+        }
+    };
+
+    std::vector<std::thread> workers;
+    for (size_t i = 0; i < classify_threads; i++)
+        workers.emplace_back(worker_fn, i);
+
+    // Helper: dispatch classify for [base, base+count) and wait
+    auto dispatch_and_wait = [&](size_t base, size_t cnt) {
+        pool_base = base;
+        pool_count = cnt;
+        pool_next.store(0, std::memory_order_relaxed);
+        pool_done.store(0, std::memory_order_relaxed);
+        pool_epoch.fetch_add(1, std::memory_order_release);
+
+        // Main thread also helps
+        while (true) {
+            size_t idx = pool_next.fetch_add(1, std::memory_order_relaxed);
+            if (idx >= cnt) break;
+            size_t global_idx = idx + base;
+            if (cache_ptr[global_idx] != 0) {
+                pool_done.fetch_add(1, std::memory_order_release);
+                continue;
+            }
+            const auto& update = data_graph_.updates_vec_[global_idx];
+            bool safe = matching_instance_->Classify(update.id1, update.id2, update.label);
+            cache_ptr[global_idx] = safe ? 1 : 2;
+            pool_done.fetch_add(1, std::memory_order_release);
+        }
+        while (pool_done.load(std::memory_order_acquire) < cnt) { _mm_pause(); }
+        // Drain workers
+        pool_next.store(cnt + classify_threads + 1, std::memory_order_release);
+    };
+
+    // Helper: dispatch prefetch (non-blocking, returns immediately)
+    // Call wait_prefetch() later to ensure completion.
+    size_t prefetch_base = 0, prefetch_count = 0;
+    bool prefetch_active = false;
+
+    auto start_prefetch = [&](size_t base, size_t cnt) {
+        prefetch_base = base;
+        prefetch_count = cnt;
+        prefetch_active = true;
+        pool_base = base;
+        pool_count = cnt;
+        pool_next.store(0, std::memory_order_relaxed);
+        pool_done.store(0, std::memory_order_relaxed);
+        pool_epoch.fetch_add(1, std::memory_order_release);
+        // Don't wait — return immediately so main thread can do matching
+    };
+
+    auto wait_prefetch = [&]() {
+        if (!prefetch_active) return;
+        // Main thread helps finish remaining work
+        while (true) {
+            size_t idx = pool_next.fetch_add(1, std::memory_order_relaxed);
+            if (idx >= prefetch_count) break;
+            size_t global_idx = idx + prefetch_base;
+            if (cache_ptr[global_idx] != 0) {
+                pool_done.fetch_add(1, std::memory_order_release);
+                continue;
+            }
+            const auto& update = data_graph_.updates_vec_[global_idx];
+            bool safe = matching_instance_->Classify(update.id1, update.id2, update.label);
+            cache_ptr[global_idx] = safe ? 1 : 2;
+            pool_done.fetch_add(1, std::memory_order_release);
+        }
+        while (pool_done.load(std::memory_order_acquire) < prefetch_count) { _mm_pause(); }
+        pool_next.store(prefetch_count + classify_threads + 1, std::memory_order_release);
+        prefetch_active = false;
+    };
+
+    // ---- Main update loop ----
+    size_t sliding_window_base = 0;
+    size_t consecutive_safe_windows = 0;
+
+    while (sliding_window_base < update_size && !reach_time_limit) {
+        // Wait for any outstanding prefetch before we start this window
+        wait_prefetch();
+
+        const size_t actual = std::min(window_size, update_size - sliding_window_base);
+
+        // Phase 1: Handle vertex updates + mark in cache (main thread, fast)
+        bool has_vertex_change = false;
+        for (size_t i = 0; i < actual; i++) {
+            size_t gi = i + sliding_window_base;
+            const auto& update = data_graph_.updates_vec_[gi];
+            if (update.type == 'v' && update.is_add) {
+                matching_instance_->AddVertex(update.id1, update.label);
+                classify_cache[gi] = 1; // safe
+                num_v_updates++;
+                has_vertex_change = true;
+            } else if (update.type == 'v' && !update.is_add) {
+                classify_cache[gi] = 2; // unsafe
+                has_vertex_change = true;
+            }
+            // edge updates: leave cache as-is (may already be prefetched)
+        }
+
+        // If vertex label changed, invalidate uncached edges after this point
+        // (conservative: only invalidate entries that were prefetched BEFORE the vertex change)
+        // In practice, Classify only checks label match which is unchanged by AddEdge,
+        // but vertex add/remove can change the label set. Be safe: invalidate if vertex changed.
+        if (has_vertex_change) {
+            for (size_t i = 0; i < actual; i++) {
+                size_t gi = i + sliding_window_base;
+                const auto& update = data_graph_.updates_vec_[gi];
+                if (update.type == 'e' && classify_cache[gi] != 0) {
+                    // This was prefetched before vertex change — might be stale
+                    // Only invalidate if there was a vertex change before this edge
+                    // For simplicity, invalidate all prefetched edges in this window
+                    classify_cache[gi] = 0;
+                }
+            }
+        }
+
+        // Phase 2: Parallel classify edges not yet in cache
+        dispatch_and_wait(sliding_window_base, actual);
+
+        // Phase 3: Find first unsafe
+        size_t first_unsafe = actual;
+        for (size_t i = 0; i < actual; i++) {
+            if (classify_cache[i + sliding_window_base] == 2) {
+                first_unsafe = i;
+                break;
+            }
+        }
+
+        if (first_unsafe >= actual) {
+            // All safe — skip entire window
+            sliding_window_base += actual;
+            num_e_updates += actual;
+            consecutive_safe_windows++;
+            // Adaptive: grow window
+            if (consecutive_safe_windows >= 2) {
+                window_size = std::min(window_size * 2, MAX_WINDOW);
+            }
+            continue;
+        }
+
+        // Phase 4: Apply unsafe update
+        // Start prefetching next window in background (unless vertex removal)
+        consecutive_safe_windows = 0;
+        // Adaptive: shrink window
+        window_size = std::max(window_size / 2, MIN_WINDOW);
+
+        size_t next_base = sliding_window_base + first_unsafe + 1;
+        size_t next_actual = (next_base < update_size)
+            ? std::min(window_size, update_size - next_base) : 0;
+
+        const auto& unsafe_update = data_graph_.updates_vec_[first_unsafe + sliding_window_base];
+        bool is_vertex_removal = (unsafe_update.type == 'v' && !unsafe_update.is_add);
+
+        // Pipeline: prefetch next window while we apply unsafe update
+        if (next_actual > 0 && !is_vertex_removal) {
+            start_prefetch(next_base, next_actual);
+        }
+
+        // Apply the unsafe update (this is the expensive part — AddEdge + FindMatches)
+        ApplyUnsafeUpdate(unsafe_update);
+
+        sliding_window_base = next_base;
+        num_e_updates += first_unsafe + 1;
+
+        // Check results change
+        size_t pos_cur = 0, neg_cur = 0;
+        matching_instance_->GetNumPositiveResults(pos_cur);
+        matching_instance_->GetNumNegativeResults(neg_cur);
+        if (pos_cur != positive_num_results_last ||
+            neg_cur != negative_num_results_last) {
+            positive_num_results_last = pos_cur;
+            negative_num_results_last = neg_cur;
+            unsafe_updates++;
+        }
+    }
+
+    // Wait for any outstanding prefetch
+    wait_prefetch();
+
+    // Shutdown pool
+    pool_stop.store(true, std::memory_order_release);
+    pool_epoch.fetch_add(1, std::memory_order_release);
+    for (auto& t : workers) t.join();
+}
+
+// ===========================================================================
 // BatchUpdates_AllAtOnce
 //
 // Strategy: pre-classify ALL updates, add ALL unsafe edges to graph, then
@@ -1234,6 +1479,288 @@ void InterExecutor::BatchUpdates_AllAtOnce(
             matching_instance_->RemoveVertex(u.id1);
         }
     }
+}
+
+// =====================================================================
+// Versioned batch update: inner-update semantics + full parallelism
+// =====================================================================
+
+void InterExecutor::BatchUpdates_Versioned(
+    size_t& num_v_updates,
+    size_t& num_e_updates,
+    size_t& unsafe_updates,
+    size_t& count,
+    size_t& positive_num_results_last,
+    size_t& negative_num_results_last,
+    std::atomic_bool& reach_time_limit,
+    size_t num_threads
+) {
+    auto t_total_start = std::chrono::high_resolution_clock::now();
+
+    const size_t update_size = data_graph_.updates_vec_.size();
+    if (update_size == 0) return;
+
+    // ---- Phase 1: Initialize timestamps on existing graph ----
+    auto t1 = std::chrono::high_resolution_clock::now();
+    data_graph_.InitTimestamps();
+
+    // ---- Phase 2: Classify all edges (parallel) + handle vertex updates ----
+    struct VersionedEdge { uint v1, v2, label, timestamp; };
+    std::vector<uint8_t> update_type(update_size, 0); // 0=safe_edge, 1=unsafe_edge, 2=vertex
+
+    // Sequential pass: vertex additions (must be in order)
+    for (size_t i = 0; i < update_size; i++) {
+        const auto& u = data_graph_.updates_vec_[i];
+        if (u.type == 'v') {
+            update_type[i] = 2;
+            if (u.is_add) matching_instance_->AddVertex(u.id1, u.label);
+            num_v_updates++;
+        }
+    }
+
+    // Parallel pass: classify edge updates
+    #pragma omp parallel for num_threads(num_threads) schedule(static, 512)
+    for (size_t i = 0; i < update_size; i++) {
+        if (update_type[i] != 0) continue;
+        const auto& u = data_graph_.updates_vec_[i];
+        if (u.type != 'e' || !u.is_add) {
+            update_type[i] = 2;
+            continue;
+        }
+        bool safe = matching_instance_->Classify(u.id1, u.id2, u.label);
+        update_type[i] = safe ? 0 : 1;
+    }
+
+    auto t2 = std::chrono::high_resolution_clock::now();
+    double classify_ms = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count() / 1000.0;
+
+    // ---- Phase 3: Add ALL edges with timestamps, collect unsafe edges ----
+    auto t3 = std::chrono::high_resolution_clock::now();
+    std::vector<VersionedEdge> unsafe_edges;
+    unsafe_edges.reserve(update_size / 10);
+
+    uint ts = 1;  // timestamp 0 = original graph edges
+    for (size_t i = 0; i < update_size; i++) {
+        const auto& u = data_graph_.updates_vec_[i];
+        if (u.type == 'e' && u.is_add) {
+            num_e_updates++;
+            data_graph_.AddEdgeVersioned(u.id1, u.id2, u.label, ts);
+            if (update_type[i] == 1) {
+                unsafe_edges.push_back({u.id1, u.id2, u.label, ts});
+            }
+            ts++;
+        }
+    }
+
+    auto t4 = std::chrono::high_resolution_clock::now();
+    double add_edges_ms = std::chrono::duration_cast<std::chrono::microseconds>(t4 - t3).count() / 1000.0;
+
+    std::cout << "[versioned] classify: " << classify_ms << " ms, "
+              << "add edges: " << add_edges_ms << " ms ("
+              << unsafe_edges.size() << " unsafe / " << (ts - 1) << " total)" << std::endl;
+
+    // ---- Phase 4: Prepare per-thread state ----
+    matching_instance_->PrepareBatchEnumeration(num_threads);
+
+    // ---- Phase 5: Search all unsafe edges in parallel (version-aware) ----
+    auto t5 = std::chrono::high_resolution_clock::now();
+    const size_t n_unsafe = unsafe_edges.size();
+    std::vector<size_t> thread_results(num_threads, 0);
+
+    #pragma omp parallel num_threads(num_threads)
+    {
+        size_t tid = omp_get_thread_num();
+        #pragma omp for schedule(dynamic, 1)
+        for (size_t k = 0; k < n_unsafe; k++) {
+            if (reach_time_limit) continue;
+            const auto& e = unsafe_edges[k];
+            size_t r = matching_instance_->EnumerateNewEdgeVersioned(
+                e.v1, e.v2, e.label, tid, e.timestamp);
+            thread_results[tid] += r;
+        }
+    }
+
+    auto t6 = std::chrono::high_resolution_clock::now();
+    double search_ms = std::chrono::duration_cast<std::chrono::microseconds>(t6 - t5).count() / 1000.0;
+
+    // ---- Phase 6: Aggregate results ----
+    size_t total_positive = 0;
+    for (size_t t = 0; t < num_threads; t++) {
+        total_positive += thread_results[t];
+    }
+    matching_instance_->AddPositiveResults(total_positive);
+
+    size_t pos_cur = 0, neg_cur = 0;
+    matching_instance_->GetNumPositiveResults(pos_cur);
+    matching_instance_->GetNumNegativeResults(neg_cur);
+    positive_num_results_last = pos_cur;
+    negative_num_results_last = neg_cur;
+    unsafe_updates = unsafe_edges.size();
+
+    // Handle vertex removals
+    for (size_t i = 0; i < update_size; i++) {
+        const auto& u = data_graph_.updates_vec_[i];
+        if (u.type == 'v' && !u.is_add) {
+            matching_instance_->RemoveVertex(u.id1);
+        }
+    }
+
+    // Clean up timestamps
+    data_graph_.ClearTimestamps();
+
+    auto t_end = std::chrono::high_resolution_clock::now();
+    double total_ms = std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_total_start).count() / 1000.0;
+
+    std::cout << "[versioned] search: " << search_ms << " ms, "
+              << "total: " << total_ms << " ms, "
+              << "positive: " << total_positive << std::endl;
+}
+
+// =====================================================================
+// GPU BFS Versioned: inner-update semantics with GPU batch parallelism
+// =====================================================================
+
+void InterExecutor::BatchUpdates_GPU_BFS_Versioned(
+    size_t& num_v_updates,
+    size_t& num_e_updates,
+    size_t& unsafe_updates,
+    size_t& count,
+    size_t& positive_num_results_last,
+    size_t& negative_num_results_last,
+    std::atomic_bool& reach_time_limit
+) {
+    auto t_total_start = std::chrono::high_resolution_clock::now();
+
+    const size_t update_size = data_graph_.updates_vec_.size();
+    if (update_size == 0) return;
+
+    Graph& query = matching_instance_->GetQueryGraph();
+    Graph& data = matching_instance_->GetDataGraph();
+
+    // ---- Phase 1: Vertex updates + classify edges (CPU OMP) ----
+    auto t1 = std::chrono::high_resolution_clock::now();
+
+    data_graph_.InitTimestamps();
+
+    struct VersionedEdge { uint v1, v2, label; uint32_t timestamp; };
+    std::vector<uint8_t> update_type(update_size, 0);
+
+    for (size_t i = 0; i < update_size; i++) {
+        const auto& u = data_graph_.updates_vec_[i];
+        if (u.type == 'v') {
+            update_type[i] = 2;
+            if (u.is_add) matching_instance_->AddVertex(u.id1, u.label);
+            num_v_updates++;
+        }
+    }
+
+    #pragma omp parallel for schedule(static, 512)
+    for (size_t i = 0; i < update_size; i++) {
+        if (update_type[i] != 0) continue;
+        const auto& u = data_graph_.updates_vec_[i];
+        if (u.type != 'e' || !u.is_add) { update_type[i] = 2; continue; }
+        bool safe = matching_instance_->Classify(u.id1, u.id2, u.label);
+        update_type[i] = safe ? 0 : 1;
+    }
+
+    auto t2 = std::chrono::high_resolution_clock::now();
+    double classify_ms = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count() / 1000.0;
+
+    // ---- Phase 2: Add ALL edges with timestamps ----
+    auto t3 = std::chrono::high_resolution_clock::now();
+
+    std::vector<VersionedEdge> unsafe_edges;
+    unsafe_edges.reserve(update_size / 10);
+
+    uint32_t ts = 1;
+    for (size_t i = 0; i < update_size; i++) {
+        const auto& u = data_graph_.updates_vec_[i];
+        if (u.type == 'e' && u.is_add) {
+            num_e_updates++;
+            data_graph_.AddEdgeVersioned(u.id1, u.id2, u.label, ts);
+            if (update_type[i] == 1) {
+                unsafe_edges.push_back({u.id1, u.id2, u.label, ts});
+            }
+            ts++;
+        }
+    }
+
+    auto t4 = std::chrono::high_resolution_clock::now();
+    double add_edges_ms = std::chrono::duration_cast<std::chrono::microseconds>(t4 - t3).count() / 1000.0;
+
+    // ---- Phase 3: Build versioned CSR on GPU ----
+    auto t5 = std::chrono::high_resolution_clock::now();
+
+    if (!gpu_bfs_ready_) {
+        gpu_bfs_search_.SetupQuery(query);
+    }
+    gpu_bfs_search_.BuildCSR_Versioned(data);
+
+    const auto& orders = matching_instance_->GetMatchingOrders();
+    uint32_t Q = query.NumVertices();
+    uint32_t num_query_edges = static_cast<uint32_t>(orders.size());
+
+    std::vector<uint32_t> flat_orders(num_query_edges * Q);
+    for (uint32_t i = 0; i < num_query_edges; i++) {
+        for (uint32_t j = 0; j < Q && j < orders[i].size(); j++) {
+            flat_orders[i * Q + j] = orders[i][j];
+        }
+    }
+    gpu_bfs_search_.SetAllMatchingOrders(flat_orders.data(), num_query_edges, Q);
+    gpu_bfs_ready_ = true;
+
+    auto t6 = std::chrono::high_resolution_clock::now();
+    double csr_ms = std::chrono::duration_cast<std::chrono::microseconds>(t6 - t5).count() / 1000.0;
+
+    // ---- Phase 4: GPU BFS versioned search ----
+    auto t7 = std::chrono::high_resolution_clock::now();
+
+    std::vector<uint32_t> ev1(unsafe_edges.size()), ev2(unsafe_edges.size());
+    std::vector<uint32_t> elab(unsafe_edges.size()), ets(unsafe_edges.size());
+    for (size_t i = 0; i < unsafe_edges.size(); i++) {
+        ev1[i] = unsafe_edges[i].v1;
+        ev2[i] = unsafe_edges[i].v2;
+        elab[i] = unsafe_edges[i].label;
+        ets[i] = unsafe_edges[i].timestamp;
+    }
+
+    uint64_t total_matches = gpu_bfs_search_.SearchBatchEdgesBFS_Versioned(
+        ev1.data(), ev2.data(), elab.data(), ets.data(),
+        static_cast<uint32_t>(unsafe_edges.size()),
+        num_query_edges, Q
+    );
+
+    auto t8 = std::chrono::high_resolution_clock::now();
+    double search_ms = std::chrono::duration_cast<std::chrono::microseconds>(t8 - t7).count() / 1000.0;
+
+    // ---- Phase 5: Aggregate results ----
+    matching_instance_->AddPositiveResults(static_cast<size_t>(total_matches));
+
+    size_t pos_cur = 0, neg_cur = 0;
+    matching_instance_->GetNumPositiveResults(pos_cur);
+    matching_instance_->GetNumNegativeResults(neg_cur);
+    positive_num_results_last = pos_cur;
+    negative_num_results_last = neg_cur;
+    unsafe_updates = unsafe_edges.size();
+
+    for (size_t i = 0; i < update_size; i++) {
+        const auto& u = data_graph_.updates_vec_[i];
+        if (u.type == 'v' && !u.is_add) {
+            matching_instance_->RemoveVertex(u.id1);
+        }
+    }
+
+    data_graph_.ClearTimestamps();
+
+    auto t_end = std::chrono::high_resolution_clock::now();
+    double total_ms = std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_total_start).count() / 1000.0;
+
+    std::cout << "[GPU-BFS-Versioned] Complete:" << std::endl;
+    std::cout << "  classify:    " << classify_ms << " ms" << std::endl;
+    std::cout << "  add edges:   " << add_edges_ms << " ms (" << unsafe_edges.size() << " unsafe)" << std::endl;
+    std::cout << "  build CSR:   " << csr_ms << " ms" << std::endl;
+    std::cout << "  BFS search:  " << search_ms << " ms (" << total_matches << " matches)" << std::endl;
+    std::cout << "  total time:  " << total_ms << " ms" << std::endl;
 }
 
 // =====================================================================
@@ -1459,4 +1986,504 @@ void InterExecutor::BatchUpdates_GPU(
     std::cout << "  windows:          " << num_windows << " (avg batch " 
               << (num_windows > 0 ? total_gpu_edges / num_windows : 0) << " edges/window)" << std::endl;
     std::cout << "  vlabel syncs:     " << vlabel_update_count << " / " << num_windows << " windows" << std::endl;
+}
+
+// =====================================================================
+// GPU inter-update: all data on GPU, batch enumeration on GPU
+// =====================================================================
+
+void InterExecutor::BatchUpdates_GPU_AllAtOnce(
+    size_t& num_v_updates,
+    size_t& num_e_updates,
+    size_t& unsafe_updates,
+    size_t& count,
+    size_t& positive_num_results_last,
+    size_t& negative_num_results_last,
+    std::atomic_bool& reach_time_limit
+) {
+    auto t_total_start = std::chrono::high_resolution_clock::now();
+
+    const size_t update_size = data_graph_.updates_vec_.size();
+    if (update_size == 0) return;
+
+    Graph& query = matching_instance_->GetQueryGraph();
+    Graph& data = matching_instance_->GetDataGraph();
+
+    // ---- Phase 1: Apply vertex updates & classify edge updates (CPU) ----
+    auto t1 = std::chrono::high_resolution_clock::now();
+
+    struct UnsafeEdge { uint v1, v2, label; };
+
+    std::vector<uint8_t> update_type(update_size, 0);
+    // Apply vertex updates
+    for (size_t i = 0; i < update_size; i++) {
+        const auto& u = data_graph_.updates_vec_[i];
+        if (u.type == 'v') {
+            update_type[i] = 2;
+            if (u.is_add) matching_instance_->AddVertex(u.id1, u.label);
+            num_v_updates++;
+        }
+    }
+
+    // Classify edges (parallel on CPU for now)
+    #pragma omp parallel for schedule(static, 512)
+    for (size_t i = 0; i < update_size; i++) {
+        if (update_type[i] != 0) continue;
+        const auto& u = data_graph_.updates_vec_[i];
+        if (u.type != 'e' || !u.is_add) { update_type[i] = 2; continue; }
+        bool safe = matching_instance_->Classify(u.id1, u.id2, u.label);
+        update_type[i] = safe ? 0 : 1;
+    }
+
+    // Collect unsafe edges
+    std::vector<UnsafeEdge> unsafe_edges;
+    for (size_t i = 0; i < update_size; i++) {
+        if (update_type[i] == 1) {
+            const auto& u = data_graph_.updates_vec_[i];
+            unsafe_edges.push_back({u.id1, u.id2, u.label});
+        }
+        if (data_graph_.updates_vec_[i].type == 'e') num_e_updates++;
+    }
+
+    auto t2 = std::chrono::high_resolution_clock::now();
+    double classify_ms = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count() / 1000.0;
+
+    // ---- Phase 2: Add ALL unsafe edges to data graph (CPU serial) ----
+    auto t3 = std::chrono::high_resolution_clock::now();
+    for (const auto& e : unsafe_edges) {
+        data_graph_.AddEdge(e.v1, e.v2, e.label);
+    }
+    auto t4 = std::chrono::high_resolution_clock::now();
+    double add_edges_ms = std::chrono::duration_cast<std::chrono::microseconds>(t4 - t3).count() / 1000.0;
+
+    // ---- Phase 3: Build CSR on GPU from final graph state (ONCE) ----
+    auto t5 = std::chrono::high_resolution_clock::now();
+
+    if (!gpu_search_ready_) {
+        gpu_search_engine_.SetupQuery(query);
+    }
+    gpu_search_engine_.BuildCSR(data);
+
+    // Set all matching orders
+    const auto& orders = matching_instance_->GetMatchingOrders();
+    uint32_t Q = query.NumVertices();
+    uint32_t num_query_edges = static_cast<uint32_t>(orders.size());
+
+    std::vector<uint32_t> flat_orders(num_query_edges * Q);
+    for (uint32_t i = 0; i < num_query_edges; i++) {
+        for (uint32_t j = 0; j < Q && j < orders[i].size(); j++) {
+            flat_orders[i * Q + j] = orders[i][j];
+        }
+    }
+    gpu_search_engine_.SetAllMatchingOrders(flat_orders.data(), num_query_edges, Q);
+    gpu_search_ready_ = true;
+
+    auto t6 = std::chrono::high_resolution_clock::now();
+    double csr_ms = std::chrono::duration_cast<std::chrono::microseconds>(t6 - t5).count() / 1000.0;
+
+    // ---- Phase 4: GPU batch enumeration ----
+    auto t7 = std::chrono::high_resolution_clock::now();
+
+    std::vector<uint32_t> ev1(unsafe_edges.size()), ev2(unsafe_edges.size()), elab(unsafe_edges.size());
+    for (size_t i = 0; i < unsafe_edges.size(); i++) {
+        ev1[i] = unsafe_edges[i].v1;
+        ev2[i] = unsafe_edges[i].v2;
+        elab[i] = unsafe_edges[i].label;
+    }
+
+    uint64_t total_matches = gpu_search_engine_.SearchBatchEdges(
+        ev1.data(), ev2.data(), elab.data(),
+        static_cast<uint32_t>(unsafe_edges.size()),
+        num_query_edges, Q
+    );
+
+    auto t8 = std::chrono::high_resolution_clock::now();
+    double search_ms = std::chrono::duration_cast<std::chrono::microseconds>(t8 - t7).count() / 1000.0;
+
+    // ---- Phase 5: Aggregate results ----
+    matching_instance_->AddPositiveResults(static_cast<size_t>(total_matches));
+
+    size_t pos_cur = 0, neg_cur = 0;
+    matching_instance_->GetNumPositiveResults(pos_cur);
+    matching_instance_->GetNumNegativeResults(neg_cur);
+    positive_num_results_last = pos_cur;
+    negative_num_results_last = neg_cur;
+    unsafe_updates = unsafe_edges.size();
+
+    // Handle vertex removals
+    for (size_t i = 0; i < update_size; i++) {
+        const auto& u = data_graph_.updates_vec_[i];
+        if (u.type == 'v' && !u.is_add) {
+            matching_instance_->RemoveVertex(u.id1);
+        }
+    }
+
+    auto t_end = std::chrono::high_resolution_clock::now();
+    double total_ms = std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_total_start).count() / 1000.0;
+
+    std::cout << "[GPU-AllAtOnce] Complete:" << std::endl;
+    std::cout << "  classify:    " << classify_ms << " ms" << std::endl;
+    std::cout << "  add edges:   " << add_edges_ms << " ms (" << unsafe_edges.size() << " unsafe)" << std::endl;
+    std::cout << "  build CSR:   " << csr_ms << " ms" << std::endl;
+    std::cout << "  GPU search:  " << search_ms << " ms (" << total_matches << " matches)" << std::endl;
+    std::cout << "  total tasks: " << unsafe_edges.size() * num_query_edges * 2 << std::endl;
+    std::cout << "  total time:  " << total_ms << " ms" << std::endl;
+}
+
+// =====================================================================
+// GPU BFS-level parallel inter-update
+// =====================================================================
+
+void InterExecutor::BatchUpdates_GPU_BFS(
+    size_t& num_v_updates,
+    size_t& num_e_updates,
+    size_t& unsafe_updates,
+    size_t& count,
+    size_t& positive_num_results_last,
+    size_t& negative_num_results_last,
+    std::atomic_bool& reach_time_limit
+) {
+    auto t_total_start = std::chrono::high_resolution_clock::now();
+
+    const size_t update_size = data_graph_.updates_vec_.size();
+    if (update_size == 0) return;
+
+    Graph& query = matching_instance_->GetQueryGraph();
+    Graph& data = matching_instance_->GetDataGraph();
+
+    // ---- Phase 1: Apply vertex updates & classify edge updates (CPU) ----
+    auto t1 = std::chrono::high_resolution_clock::now();
+
+    struct UnsafeEdge { uint v1, v2, label; };
+    std::vector<uint8_t> update_type(update_size, 0);
+
+    for (size_t i = 0; i < update_size; i++) {
+        const auto& u = data_graph_.updates_vec_[i];
+        if (u.type == 'v') {
+            update_type[i] = 2;
+            if (u.is_add) matching_instance_->AddVertex(u.id1, u.label);
+            num_v_updates++;
+        }
+    }
+
+    #pragma omp parallel for schedule(static, 512)
+    for (size_t i = 0; i < update_size; i++) {
+        if (update_type[i] != 0) continue;
+        const auto& u = data_graph_.updates_vec_[i];
+        if (u.type != 'e' || !u.is_add) { update_type[i] = 2; continue; }
+        bool safe = matching_instance_->Classify(u.id1, u.id2, u.label);
+        update_type[i] = safe ? 0 : 1;
+    }
+
+    std::vector<UnsafeEdge> unsafe_edges;
+    for (size_t i = 0; i < update_size; i++) {
+        if (update_type[i] == 1) {
+            const auto& u = data_graph_.updates_vec_[i];
+            unsafe_edges.push_back({u.id1, u.id2, u.label});
+        }
+        if (data_graph_.updates_vec_[i].type == 'e') num_e_updates++;
+    }
+
+    auto t2 = std::chrono::high_resolution_clock::now();
+    double classify_ms = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count() / 1000.0;
+
+    // ---- Phase 2: Add ALL unsafe edges to data graph (CPU serial) ----
+    auto t3 = std::chrono::high_resolution_clock::now();
+    for (const auto& e : unsafe_edges) {
+        data_graph_.AddEdge(e.v1, e.v2, e.label);
+    }
+    auto t4 = std::chrono::high_resolution_clock::now();
+    double add_edges_ms = std::chrono::duration_cast<std::chrono::microseconds>(t4 - t3).count() / 1000.0;
+
+    // ---- Phase 3: Build CSR + setup query + orders on GPU (ONCE) ----
+    auto t5 = std::chrono::high_resolution_clock::now();
+
+    if (!gpu_bfs_ready_) {
+        gpu_bfs_search_.SetupQuery(query);
+    }
+    gpu_bfs_search_.BuildCSR(data);
+
+    const auto& orders = matching_instance_->GetMatchingOrders();
+    uint32_t Q = query.NumVertices();
+    uint32_t num_query_edges = static_cast<uint32_t>(orders.size());
+
+    std::vector<uint32_t> flat_orders(num_query_edges * Q);
+    for (uint32_t i = 0; i < num_query_edges; i++) {
+        for (uint32_t j = 0; j < Q && j < orders[i].size(); j++) {
+            flat_orders[i * Q + j] = orders[i][j];
+        }
+    }
+    gpu_bfs_search_.SetAllMatchingOrders(flat_orders.data(), num_query_edges, Q);
+    gpu_bfs_ready_ = true;
+
+    auto t6 = std::chrono::high_resolution_clock::now();
+    double csr_ms = std::chrono::duration_cast<std::chrono::microseconds>(t6 - t5).count() / 1000.0;
+
+    // ---- Phase 4: GPU BFS-level search ----
+    auto t7 = std::chrono::high_resolution_clock::now();
+
+    std::vector<uint32_t> ev1(unsafe_edges.size()), ev2(unsafe_edges.size()), elab(unsafe_edges.size());
+    for (size_t i = 0; i < unsafe_edges.size(); i++) {
+        ev1[i] = unsafe_edges[i].v1;
+        ev2[i] = unsafe_edges[i].v2;
+        elab[i] = unsafe_edges[i].label;
+    }
+
+    uint64_t total_matches = gpu_bfs_search_.SearchBatchEdgesBFS(
+        ev1.data(), ev2.data(), elab.data(),
+        static_cast<uint32_t>(unsafe_edges.size()),
+        num_query_edges, Q
+    );
+
+    auto t8 = std::chrono::high_resolution_clock::now();
+    double search_ms = std::chrono::duration_cast<std::chrono::microseconds>(t8 - t7).count() / 1000.0;
+
+    // ---- Phase 5: Aggregate results ----
+    matching_instance_->AddPositiveResults(static_cast<size_t>(total_matches));
+
+    size_t pos_cur = 0, neg_cur = 0;
+    matching_instance_->GetNumPositiveResults(pos_cur);
+    matching_instance_->GetNumNegativeResults(neg_cur);
+    positive_num_results_last = pos_cur;
+    negative_num_results_last = neg_cur;
+    unsafe_updates = unsafe_edges.size();
+
+    for (size_t i = 0; i < update_size; i++) {
+        const auto& u = data_graph_.updates_vec_[i];
+        if (u.type == 'v' && !u.is_add) {
+            matching_instance_->RemoveVertex(u.id1);
+        }
+    }
+
+    auto t_end = std::chrono::high_resolution_clock::now();
+    double total_ms = std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_total_start).count() / 1000.0;
+
+    std::cout << "[GPU-BFS] Complete:" << std::endl;
+    std::cout << "  classify:    " << classify_ms << " ms" << std::endl;
+    std::cout << "  add edges:   " << add_edges_ms << " ms (" << unsafe_edges.size() << " unsafe)" << std::endl;
+    std::cout << "  build CSR:   " << csr_ms << " ms" << std::endl;
+    std::cout << "  BFS search:  " << search_ms << " ms (" << total_matches << " matches)" << std::endl;
+    std::cout << "  total time:  " << total_ms << " ms" << std::endl;
+}
+
+// =====================================================================
+// GPU BFS inner-update: padded CSR + per-edge BFS search
+// =====================================================================
+
+void InterExecutor::BatchUpdates_GPU_BFS_Single(
+    size_t& num_v_updates,
+    size_t& num_e_updates,
+    size_t& unsafe_updates,
+    size_t& count,
+    size_t& positive_num_results_last,
+    size_t& negative_num_results_last,
+    std::atomic_bool& reach_time_limit
+) {
+    auto t_total_start = std::chrono::high_resolution_clock::now();
+
+    const size_t update_size = data_graph_.updates_vec_.size();
+    if (update_size == 0) return;
+
+    Graph& query = matching_instance_->GetQueryGraph();
+    Graph& data = matching_instance_->GetDataGraph();
+
+    // ---- One-time setup: build padded CSR + query + orders on GPU ----
+    if (!gpu_bfs_ready_) {
+        gpu_bfs_search_.SetupQuery(query);
+        gpu_bfs_search_.BuildPaddedCSR(data);
+
+        const auto& orders = matching_instance_->GetMatchingOrders();
+        uint32_t Q = query.NumVertices();
+        uint32_t num_query_edges = static_cast<uint32_t>(orders.size());
+
+        std::vector<uint32_t> flat_orders(num_query_edges * Q);
+        for (uint32_t i = 0; i < num_query_edges; i++) {
+            for (uint32_t j = 0; j < Q && j < orders[i].size(); j++) {
+                flat_orders[i * Q + j] = orders[i][j];
+            }
+        }
+        gpu_bfs_search_.SetAllMatchingOrders(flat_orders.data(), num_query_edges, Q);
+        gpu_bfs_ready_ = true;
+    }
+
+    uint32_t Q = query.NumVertices();
+    const auto& orders = matching_instance_->GetMatchingOrders();
+    uint32_t num_query_edges = static_cast<uint32_t>(orders.size());
+
+    size_t total_gpu_searches = 0;
+    size_t total_csr_rebuilds = 0;
+    size_t total_safe_edges = 0;
+    size_t total_flushes = 0;
+    double time_classify_us = 0, time_add_us = 0, time_gpu_search_us = 0, time_csr_update_us = 0;
+
+    // Mini-batch window: accumulate unsafe edges, search in one kernel launch
+    static constexpr size_t WINDOW_SIZE = 500;
+    std::vector<uint32_t> unsafe_v1, unsafe_v2, unsafe_label;
+    unsafe_v1.reserve(WINDOW_SIZE);
+    unsafe_v2.reserve(WINDOW_SIZE);
+    unsafe_label.reserve(WINDOW_SIZE);
+
+    printf("[GPU-BFS-Window] Starting: %zu updates, Q=%u, num_query_edges=%u, window=%zu\n",
+           update_size, Q, num_query_edges, WINDOW_SIZE);
+    fflush(stdout);
+
+    // Track dirty vertices whose GPU CSR is stale (safe edges modify CPU graph but not GPU)
+    std::unordered_set<uint32_t> dirty_vertices;
+    size_t total_lazy_skips = 0;
+
+    // Flush dirty vertices to GPU CSR
+    auto flush_dirty = [&]() {
+        if (dirty_vertices.empty()) return;
+        auto tf0 = std::chrono::high_resolution_clock::now();
+        for (uint32_t v : dirty_vertices) {
+            uint32_t deg = data.GetDegree(v);
+            // Check padding capacity
+            if (v < gpu_bfs_search_.num_vertices_ && !gpu_bfs_search_.h_capacities_.empty()
+                && deg <= gpu_bfs_search_.h_capacities_[v]) {
+                // Incremental update single vertex
+                const auto& nbrs = data.GetNeighbors(v);
+                const auto& labs = data.GetNeighborLabels(v);
+                gpu_bfs_search_.IncrementalUpdateVertex(v, nbrs.data(), labs.data(), deg);
+            } else {
+                // Need full rebuild
+                gpu_bfs_search_.BuildPaddedCSR(data);
+                total_csr_rebuilds++;
+                dirty_vertices.clear();
+                auto tf1 = std::chrono::high_resolution_clock::now();
+                time_csr_update_us += std::chrono::duration_cast<std::chrono::microseconds>(tf1 - tf0).count();
+                return;
+            }
+        }
+        auto tf1 = std::chrono::high_resolution_clock::now();
+        time_csr_update_us += std::chrono::duration_cast<std::chrono::microseconds>(tf1 - tf0).count();
+        total_lazy_skips += dirty_vertices.size();
+        dirty_vertices.clear();
+    };
+
+    // ---- Process updates one by one ----
+    for (size_t i = 0; i < update_size && !reach_time_limit; i++) {
+        const auto& u = data_graph_.updates_vec_[i];
+
+        if (u.type == 'v') {
+            if (u.is_add) {
+                matching_instance_->AddVertex(u.id1, u.label);
+            } else {
+                matching_instance_->RemoveVertex(u.id1);
+            }
+            num_v_updates++;
+            continue;
+        }
+
+        if (u.type != 'e' || !u.is_add) continue;
+        num_e_updates++;
+
+        // Classify
+        auto tc0 = std::chrono::high_resolution_clock::now();
+        bool safe = matching_instance_->Classify(u.id1, u.id2, u.label);
+        auto tc1 = std::chrono::high_resolution_clock::now();
+        time_classify_us += std::chrono::duration_cast<std::chrono::microseconds>(tc1 - tc0).count();
+
+        // Add edge to CPU data graph
+        auto ta0 = std::chrono::high_resolution_clock::now();
+        data_graph_.AddEdge(u.id1, u.id2, u.label);
+        auto ta1 = std::chrono::high_resolution_clock::now();
+        time_add_us += std::chrono::duration_cast<std::chrono::microseconds>(ta1 - ta0).count();
+
+        if (safe) {
+            // Safe edge: only update CPU graph, mark vertices as dirty for lazy GPU sync
+            dirty_vertices.insert(u.id1);
+            dirty_vertices.insert(u.id2);
+            total_safe_edges++;
+            continue;
+        }
+
+        // Unsafe edge: accumulate for mini-batch GPU BFS
+        dirty_vertices.insert(u.id1);
+        dirty_vertices.insert(u.id2);
+        unsafe_v1.push_back(u.id1);
+        unsafe_v2.push_back(u.id2);
+        unsafe_label.push_back(u.label);
+        unsafe_updates++;
+
+        // When window is full, flush and search
+        if (unsafe_v1.size() >= WINDOW_SIZE) {
+            total_flushes++;
+            // Flush all dirty vertices to GPU CSR
+            flush_dirty();
+
+            // GPU BFS search for all accumulated unsafe edges at once
+            auto ts0 = std::chrono::high_resolution_clock::now();
+            uint64_t matches = gpu_bfs_search_.SearchBatchEdgesBFS(
+                unsafe_v1.data(), unsafe_v2.data(), unsafe_label.data(),
+                static_cast<uint32_t>(unsafe_v1.size()),
+                num_query_edges, Q
+            );
+            auto ts1 = std::chrono::high_resolution_clock::now();
+            time_gpu_search_us += std::chrono::duration_cast<std::chrono::microseconds>(ts1 - ts0).count();
+
+            if (matches > 0) {
+                matching_instance_->AddPositiveResults(static_cast<size_t>(matches));
+            }
+            total_gpu_searches++;
+
+            if (total_gpu_searches <= 5 || total_gpu_searches % 20 == 0) {
+                printf("[GPU-BFS-Window] batch #%zu: %zu edges → %lu matches, gpu_time=%.1fms\n",
+                       total_gpu_searches, unsafe_v1.size(), matches,
+                       std::chrono::duration_cast<std::chrono::microseconds>(ts1 - ts0).count() / 1000.0);
+                fflush(stdout);
+            }
+
+            unsafe_v1.clear();
+            unsafe_v2.clear();
+            unsafe_label.clear();
+        }
+
+        // Update result counters
+        size_t pos_cur = 0, neg_cur = 0;
+        matching_instance_->GetNumPositiveResults(pos_cur);
+        matching_instance_->GetNumNegativeResults(neg_cur);
+        positive_num_results_last = pos_cur;
+        negative_num_results_last = neg_cur;
+    }
+
+    // Flush remaining unsafe edges
+    if (!unsafe_v1.empty()) {
+        flush_dirty();
+        auto ts0 = std::chrono::high_resolution_clock::now();
+        uint64_t matches = gpu_bfs_search_.SearchBatchEdgesBFS(
+            unsafe_v1.data(), unsafe_v2.data(), unsafe_label.data(),
+            static_cast<uint32_t>(unsafe_v1.size()),
+            num_query_edges, Q
+        );
+        auto ts1 = std::chrono::high_resolution_clock::now();
+        time_gpu_search_us += std::chrono::duration_cast<std::chrono::microseconds>(ts1 - ts0).count();
+        if (matches > 0) {
+            matching_instance_->AddPositiveResults(static_cast<size_t>(matches));
+        }
+        total_gpu_searches++;
+        total_flushes++;
+        printf("[GPU-BFS-Window] final batch: %zu edges → %lu matches, gpu_time=%.1fms\n",
+               unsafe_v1.size(), matches,
+               std::chrono::duration_cast<std::chrono::microseconds>(ts1 - ts0).count() / 1000.0);
+        fflush(stdout);
+
+        size_t pos_cur = 0, neg_cur = 0;
+        matching_instance_->GetNumPositiveResults(pos_cur);
+        matching_instance_->GetNumNegativeResults(neg_cur);
+        positive_num_results_last = pos_cur;
+        negative_num_results_last = neg_cur;
+    }
+
+    auto t_end = std::chrono::high_resolution_clock::now();
+    double total_ms = std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_total_start).count() / 1000.0;
+
+    std::cout << "[GPU-BFS-Window] Complete:" << std::endl;
+    std::cout << "  classify:      " << time_classify_us / 1000.0 << " ms" << std::endl;
+    std::cout << "  add edges:     " << time_add_us / 1000.0 << " ms" << std::endl;
+    std::cout << "  CSR update:    " << time_csr_update_us / 1000.0 << " ms (" << total_csr_rebuilds << " rebuilds)" << std::endl;
+    std::cout << "  GPU BFS:       " << time_gpu_search_us / 1000.0 << " ms (" << total_gpu_searches << " batches, " << unsafe_updates << " unsafe edges)" << std::endl;
+    std::cout << "  safe edges:    " << total_safe_edges << " (lazy, " << total_lazy_skips << " dirty vertices flushed in " << total_flushes << " flushes)" << std::endl;
+    std::cout << "  window size:   " << WINDOW_SIZE << std::endl;
+    std::cout << "  total time:    " << total_ms << " ms" << std::endl;
+    std::cout << "  pos matches:   " << positive_num_results_last << std::endl;
 }

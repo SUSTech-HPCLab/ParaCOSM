@@ -1203,6 +1203,7 @@ inline void Parallel_TurboFlux::Parallel_FindMatches(uint order_index, uint dept
         }
     }
 
+    #pragma omp parallel num_threads(NUMT)
     {
         size_t thread_id = omp_get_thread_num();
 
@@ -1580,6 +1581,7 @@ inline void Parallel_TurboFlux::Parallel_FindMatches_delete(uint order_index, ui
         }
     }
 
+    #pragma omp parallel num_threads(NUMT)
     {
         size_t thread_id = omp_get_thread_num();
 

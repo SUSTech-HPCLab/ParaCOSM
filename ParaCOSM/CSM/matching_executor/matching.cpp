@@ -69,10 +69,15 @@ bool matching::Classify(uint v1, uint v2, uint label){
 
 size_t matching::EnumerateNewEdge(uint v1, uint v2, uint label, size_t /*thread_id*/)
 {
-    // Default: fall back to AddEdge (NOT thread-safe, NOT batch-safe)
     size_t before = num_positive_results_;
     AddEdge(v1, v2, label);
     return num_positive_results_ - before;
+}
+
+size_t matching::EnumerateNewEdgeVersioned(uint v1, uint v2, uint label,
+                                            size_t thread_id, uint /*max_timestamp*/)
+{
+    return EnumerateNewEdge(v1, v2, label, thread_id);
 }
 
 void matching::PrepareBatchEnumeration(size_t /*num_threads*/)
