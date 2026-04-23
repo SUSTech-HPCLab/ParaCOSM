@@ -62,15 +62,21 @@ void Graph::AddEdge(uint v1, uint v2, uint label)
 {
     auto lower = std::lower_bound(neighbors_[v1].begin(), neighbors_[v1].end(), v2);
     if (lower != neighbors_[v1].end() && *lower == v2) return;
-
+    
     size_t dis = std::distance(neighbors_[v1].begin(), lower);
     neighbors_[v1].emplace(lower, v2);
     elabels_[v1].emplace(elabels_[v1].begin() + dis, label);
-
+    if (!edge_timestamps_.empty()) {
+        edge_timestamps_[v1].emplace(edge_timestamps_[v1].begin() + dis, 0u);
+    }
+    
     lower = std::lower_bound(neighbors_[v2].begin(), neighbors_[v2].end(), v1);
     dis = std::distance(neighbors_[v2].begin(), lower);
     neighbors_[v2].emplace(lower, v1);
     elabels_[v2].emplace(elabels_[v2].begin() + dis, label);
+    if (!edge_timestamps_.empty()) {
+        edge_timestamps_[v2].emplace(edge_timestamps_[v2].begin() + dis, 0u);
+    }
 
     edge_count_++;
     elabel_count_ = std::max(elabel_count_, label + 1);
@@ -90,6 +96,45 @@ void Graph::AddEdge(uint v1, uint v2, uint label)
     };
     maybe_hash_insert(v1, v2, label);
     maybe_hash_insert(v2, v1, label);
+}
+
+void Graph::AddEdgeVersioned(uint v1, uint v2, uint label, uint timestamp)
+{
+    auto lower = std::lower_bound(neighbors_[v1].begin(), neighbors_[v1].end(), v2);
+    if (lower != neighbors_[v1].end() && *lower == v2) return;
+    
+    size_t dis = std::distance(neighbors_[v1].begin(), lower);
+    neighbors_[v1].emplace(lower, v2);
+    elabels_[v1].emplace(elabels_[v1].begin() + dis, label);
+    edge_timestamps_[v1].emplace(edge_timestamps_[v1].begin() + dis, timestamp);
+    
+    lower = std::lower_bound(neighbors_[v2].begin(), neighbors_[v2].end(), v1);
+    dis = std::distance(neighbors_[v2].begin(), lower);
+    neighbors_[v2].emplace(lower, v1);
+    elabels_[v2].emplace(elabels_[v2].begin() + dis, label);
+    edge_timestamps_[v2].emplace(edge_timestamps_[v2].begin() + dis, timestamp);
+
+    edge_count_++;
+    elabel_count_ = std::max(elabel_count_, label + 1);
+}
+
+void Graph::InitTimestamps()
+{
+    edge_timestamps_.resize(neighbors_.size());
+    for (size_t v = 0; v < neighbors_.size(); v++) {
+        edge_timestamps_[v].assign(neighbors_[v].size(), 0u);
+    }
+}
+
+void Graph::ClearTimestamps()
+{
+    edge_timestamps_.clear();
+    edge_timestamps_.shrink_to_fit();
+}
+
+const std::vector<uint>& Graph::GetEdgeTimestamps(uint v) const
+{
+    return edge_timestamps_[v];
 }
 
 void Graph::RemoveEdge(uint v1, uint v2)
