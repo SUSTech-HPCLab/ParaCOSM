@@ -196,10 +196,10 @@ void InterExecutor::BatchUpdates2(
                 if (insert.type == 'e' && insert.is_add) {
                     is_safes[cnt] = matching_instance_->Classify(insert.id1, insert.id2, insert.label);
                     if (!is_safes[cnt]) {
+                        #pragma omp critical
                         {
                             safe = false;
-                            if (idx_update >= cnt) {
-                                #pragma omp critical
+                            if (idx_update > cnt) {
                                 idx_update = cnt;
                             }
                         }
@@ -266,6 +266,7 @@ void InterExecutor::BatchUpdates_OpenMP(
                 update_safes[i] = matching_instance_->Classify(insert.id1, insert.id2, insert.label);
 
                 if (!update_safes[i]) {
+                    #pragma omp critical
                     {
                         is_safes = false;
                         if (min_safe > i) {
@@ -302,6 +303,8 @@ void InterExecutor::BatchUpdates_OpenMP(
 
             if (insert_unsafe.type == 'e' && insert_unsafe.is_add) {
                 matching_instance_->AddEdge(insert_unsafe.id1, insert_unsafe.id2, insert_unsafe.label);
+            } else if (insert_unsafe.type == 'e' && !insert_unsafe.is_add) {
+                matching_instance_->RemoveEdge(insert_unsafe.id1, insert_unsafe.id2);
             } else if (insert_unsafe.type == 'v' && !insert_unsafe.is_add) {
                 matching_instance_->RemoveVertex(insert_unsafe.id1);
             }
@@ -407,9 +410,18 @@ void InterExecutor::ProcessBatchUpdatesQueue(
     }
 
     if (!safe) {
-        for (size_t i = 0; i < batch_updates.size(); i++) {
+        size_t unsafe_start = idx_update;
+        for (size_t i = unsafe_start; i < batch_updates.size(); i++) {
             const auto& insert = batch_updates[i];
-            matching_instance_->AddEdge(insert.id1, insert.id2, insert.label);
+            if (insert.type == 'e' && insert.is_add) {
+                matching_instance_->AddEdge(insert.id1, insert.id2, insert.label);
+            } else if (insert.type == 'e' && !insert.is_add) {
+                matching_instance_->RemoveEdge(insert.id1, insert.id2);
+            } else if (insert.type == 'v' && insert.is_add) {
+                matching_instance_->AddVertex(insert.id1, insert.label);
+            } else if (insert.type == 'v' && !insert.is_add) {
+                matching_instance_->RemoveVertex(insert.id1);
+            }
         }
     }
 
@@ -824,9 +836,7 @@ void InterExecutor::ApplyUnsafeUpdate(const InsertUnit& update) {
     } else if (update.type == 'v' && !update.is_add) {
         matching_instance_->RemoveVertex(update.id1);
     } else if (update.type == 'e' && !update.is_add) {
-        // Note: RemoveEdge method might not exist in the base matching class
-        // This would need to be implemented or handled differently
-        std::cerr << "Warning: Edge removal not implemented in base matching class" << std::endl;
+        matching_instance_->RemoveEdge(update.id1, update.id2);
     }
 }
 
@@ -1224,4 +1234,229 @@ void InterExecutor::BatchUpdates_AllAtOnce(
             matching_instance_->RemoveVertex(u.id1);
         }
     }
+}
+
+// =====================================================================
+// GPU-accelerated batch classification
+// =====================================================================
+
+/**
+ * InitGPUClassifier
+ *
+ * Extract query edge label triples from the query graph and initialize
+ * the GPUClassifier with current data graph vertex labels.
+ */
+void InterExecutor::InitGPUClassifier() {
+    Graph& query = matching_instance_->GetQueryGraph();
+    Graph& data = matching_instance_->GetDataGraph();
+
+    // Collect all unique query edge label triples
+    // Iterate all query vertices and their neighbors (each edge appears twice)
+    std::vector<QueryEdgeTriple> triples;
+    for (uint u = 0; u < query.NumVertices(); u++) {
+        const auto& nbrs = query.GetNeighbors(u);
+        const auto& elabs = query.GetNeighborLabels(u);
+        for (size_t j = 0; j < nbrs.size(); j++) {
+            uint v = nbrs[j];
+            if (u < v) {  // avoid duplicates
+                QueryEdgeTriple t;
+                t.src_label = query.GetVertexLabel(u);
+                t.dst_label = query.GetVertexLabel(v);
+                t.edge_label = elabs[j];
+                triples.push_back(t);
+            }
+        }
+    }
+
+    std::cout << "InitGPUClassifier: " << triples.size() << " query edge triples, "
+              << data.NumVertices() << " data vertices" << std::endl;
+
+    gpu_classifier_.Init(
+        data.vlabels_.data(),
+        data.NumVertices(),
+        triples.data(),
+        triples.size()
+    );
+    gpu_initialized_ = true;
+}
+
+/**
+ * BatchUpdates_GPU
+ *
+ * GPU-accelerated sliding window batch processing over `data_graph_.updates_vec_`.
+ * Uses GPUClassifier to classify edges in bulk, then applies the first unsafe edge on CPU.
+ */
+void InterExecutor::BatchUpdates_GPU(
+    size_t& num_v_updates,
+    size_t& num_e_updates,
+    size_t& unsafe_updates,
+    size_t& count,
+    size_t& positive_num_results_last,
+    size_t& negative_num_results_last,
+    std::atomic_bool& reach_time_limit,
+    size_t window_size
+) {
+    // Initialize GPU classifier on first call
+    if (!gpu_initialized_) {
+        InitGPUClassifier();
+    }
+
+    const size_t update_size = data_graph_.updates_vec_.size();
+    size_t sliding_window_base = 0;
+
+    // Buffers for edge batch
+    std::vector<EdgeToClassify> edge_batch;
+    std::vector<uint8_t> classify_results;
+    // Map from position in edge_batch back to position in window
+    std::vector<size_t> edge_to_window_idx;
+
+    edge_batch.reserve(window_size);
+    classify_results.reserve(window_size);
+    edge_to_window_idx.reserve(window_size);
+
+    size_t total_gpu_edges = 0;
+    size_t total_unsafe = 0;
+
+    // Timing accumulators (microseconds)
+    double time_collect_us = 0, time_gpu_classify_us = 0, time_vlabel_update_us = 0;
+    double time_apply_unsafe_us = 0, time_scan_result_us = 0;
+    size_t num_windows = 0;
+    size_t vlabel_update_count = 0;  // how many times we actually updated vlabels
+
+    // Track whether GPU vlabels need refresh
+    bool vlabels_dirty = false;
+    size_t last_gpu_num_vertices = matching_instance_->GetDataGraph().NumVertices();
+
+    auto t_start = std::chrono::high_resolution_clock::now();
+
+    while (sliding_window_base < update_size && !reach_time_limit) {
+        size_t window_end = std::min(sliding_window_base + window_size, update_size);
+        size_t actual_window = window_end - sliding_window_base;
+        num_windows++;
+
+        // Phase 1: Collect all edge updates in this window; apply safe vertex ops immediately
+        auto t_collect_start = std::chrono::high_resolution_clock::now();
+        edge_batch.clear();
+        edge_to_window_idx.clear();
+
+        bool has_vertex_removal = false;
+        size_t first_vertex_removal = actual_window;
+
+        for (size_t i = 0; i < actual_window; i++) {
+            const auto& update = data_graph_.updates_vec_[sliding_window_base + i];
+
+            if (update.type == 'v' && update.is_add) {
+                // Vertex addition is always safe — apply immediately
+                matching_instance_->AddVertex(update.id1, update.label);
+                num_v_updates++;
+                vlabels_dirty = true;  // mark that GPU vlabels are stale
+            } else if (update.type == 'v' && !update.is_add) {
+                // Vertex removal is always unsafe
+                has_vertex_removal = true;
+                if (i < first_vertex_removal) {
+                    first_vertex_removal = i;
+                }
+                break;  // Stop at first unsafe
+            } else if (update.type == 'e') {
+                // Edge update — collect for GPU classification
+                EdgeToClassify e;
+                e.v1 = update.id1;
+                e.v2 = update.id2;
+                e.label = update.label;
+                edge_batch.push_back(e);
+                edge_to_window_idx.push_back(i);
+            }
+        }
+
+        // Phase 2: GPU batch classify all collected edges
+        size_t first_unsafe_window_idx = actual_window;  // sentinel
+        time_collect_us += std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::high_resolution_clock::now() - t_collect_start).count();
+
+        if (!edge_batch.empty() && !has_vertex_removal) {
+            // Only update GPU vertex labels if they actually changed
+            if (vlabels_dirty) {
+                auto t_vl = std::chrono::high_resolution_clock::now();
+                Graph& data = matching_instance_->GetDataGraph();
+                gpu_classifier_.UpdateVertexLabels(data.vlabels_.data(), data.NumVertices());
+                last_gpu_num_vertices = data.NumVertices();
+                vlabels_dirty = false;
+                vlabel_update_count++;
+                time_vlabel_update_us += std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::high_resolution_clock::now() - t_vl).count();
+            }
+
+            auto t_gpu = std::chrono::high_resolution_clock::now();
+            classify_results.resize(edge_batch.size());
+            gpu_classifier_.ClassifyBatch(
+                edge_batch.data(),
+                edge_batch.size(),
+                classify_results.data()
+            );
+            time_gpu_classify_us += std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::high_resolution_clock::now() - t_gpu).count();
+            total_gpu_edges += edge_batch.size();
+
+            // Find first unsafe edge
+            auto t_scan = std::chrono::high_resolution_clock::now();
+            for (size_t j = 0; j < edge_batch.size(); j++) {
+                if (!classify_results[j]) {
+                    // Unsafe
+                    first_unsafe_window_idx = edge_to_window_idx[j];
+                    break;
+                }
+            }
+            time_scan_result_us += std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::high_resolution_clock::now() - t_scan).count();
+        } else if (has_vertex_removal) {
+            first_unsafe_window_idx = first_vertex_removal;
+        }
+
+        // Phase 3: Apply first unsafe update on CPU
+        if (first_unsafe_window_idx < actual_window) {
+            auto t_apply = std::chrono::high_resolution_clock::now();
+            const auto& unsafe_update = data_graph_.updates_vec_[sliding_window_base + first_unsafe_window_idx];
+            ApplyUnsafeUpdate(unsafe_update);
+            time_apply_unsafe_us += std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::high_resolution_clock::now() - t_apply).count();
+            total_unsafe++;
+
+            sliding_window_base += first_unsafe_window_idx + 1;
+            num_e_updates += first_unsafe_window_idx + 1;
+
+            // Check if results changed
+            size_t pos_cur = 0, neg_cur = 0;
+            matching_instance_->GetNumPositiveResults(pos_cur);
+            matching_instance_->GetNumNegativeResults(neg_cur);
+            if (pos_cur != positive_num_results_last ||
+                neg_cur != negative_num_results_last) {
+                positive_num_results_last = pos_cur;
+                negative_num_results_last = neg_cur;
+                unsafe_updates++;
+            }
+        } else {
+            // All safe — skip entire window
+            sliding_window_base += actual_window;
+            num_e_updates += actual_window;
+        }
+    }
+
+    auto t_end = std::chrono::high_resolution_clock::now();
+    double elapsed_ms = std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_start).count() / 1000.0;
+
+    std::cout << "[GPU] BatchUpdates_GPU complete: "
+              << total_gpu_edges << " edges classified on GPU, "
+              << total_unsafe << " unsafe updates, "
+              << elapsed_ms << "ms total" << std::endl;
+    std::cout << "[GPU] Timing breakdown:" << std::endl;
+    std::cout << "  collect edges:    " << time_collect_us / 1000.0 << " ms" << std::endl;
+    std::cout << "  vlabel update:    " << time_vlabel_update_us / 1000.0 << " ms" << std::endl;
+    std::cout << "  GPU classify:     " << time_gpu_classify_us / 1000.0 << " ms" << std::endl;
+    std::cout << "  scan results:     " << time_scan_result_us / 1000.0 << " ms" << std::endl;
+    std::cout << "  apply unsafe:     " << time_apply_unsafe_us / 1000.0 << " ms" << std::endl;
+    double overhead = elapsed_ms - (time_collect_us + time_vlabel_update_us + time_gpu_classify_us + time_scan_result_us + time_apply_unsafe_us) / 1000.0;
+    std::cout << "  other overhead:   " << overhead << " ms" << std::endl;
+    std::cout << "  windows:          " << num_windows << " (avg batch " 
+              << (num_windows > 0 ? total_gpu_edges / num_windows : 0) << " edges/window)" << std::endl;
+    std::cout << "  vlabel syncs:     " << vlabel_update_count << " / " << num_windows << " windows" << std::endl;
 }

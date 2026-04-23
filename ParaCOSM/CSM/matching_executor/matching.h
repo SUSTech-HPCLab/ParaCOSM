@@ -93,6 +93,18 @@ public:
     /// Thread-safe: atomically add to the positive results counter.
     void AddPositiveResults(size_t delta) { num_positive_results_ += delta; }
 
+    // Graph accessors
+    Graph& GetQueryGraph() { return query_; }
+    Graph& GetDataGraph() { return data_; }
+    const Graph& GetQueryGraph() const { return query_; }
+    const Graph& GetDataGraph() const { return data_; }
+
+    // Matching order accessor (for GPU inter-update)
+    virtual const std::vector<std::vector<uint>>& GetMatchingOrders() const {
+        static const std::vector<std::vector<uint>> empty;
+        return empty;
+    }
+
     void PrintCounter();
     
 };

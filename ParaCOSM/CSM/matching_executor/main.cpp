@@ -156,6 +156,10 @@ inline void RunUpdates_InterExecutor(Graph& data_graph, matching* mm, size_t& nu
         executor.BatchUpdates_AllAtOnce(
             num_v_updates, num_e_updates, unsafe_updates, count,
             positive_num_results_last, negative_num_results_last, reach_time_limit, num_threads);
+    } else if (update_mode == "gpu") {
+        executor.BatchUpdates_GPU(
+            num_v_updates, num_e_updates, unsafe_updates, count,
+            positive_num_results_last, negative_num_results_last, reach_time_limit);
     } else {
         // default fallback
         executor.BatchUpdates3(

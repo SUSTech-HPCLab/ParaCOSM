@@ -67,8 +67,12 @@ Parallel_Graphflow::Parallel_Graphflow(Graph& query_graph, Graph& data_graph,
         }
     }
 
-    local_vec_m = std::vector<std::vector<uint>>(BIG_THREAD, std::vector<uint>(query_.NumVertices())); 
+    local_vec_m = std::vector<std::vector<uint>>(BIG_THREAD, std::vector<uint>(query_.NumVertices()));
     local_vec_visited_local = std::vector<std::vector<bool>>(BIG_THREAD, std::vector<bool>(data_.NumVertices(), false));
+
+    // Pre-allocate thread-local m vectors to avoid per-task heap allocation
+    tl_m_.resize(BIG_THREAD);
+    for (auto& v : tl_m_) v.resize(query_.NumVertices(), UNMATCHED);
 
     persistent_executor_ = std::make_unique<tf::Executor>(NUMTHREAD > 0 ? NUMTHREAD : 1);
 
@@ -1218,6 +1222,141 @@ void Parallel_Graphflow::Parallel_FindMatches2(uint order_index, uint depth, std
     const auto& u_min_nbrs = data_.GetNeighbors(m[u_min]);
     const auto& u_min_nbr_labels = data_.GetNeighborLabels(m[u_min]);
 
+    // ---- GPU-accelerated Layer 1 filtering ----
+    static size_t gpu_calls = 0, cpu_calls = 0;
+    if (u_min_nbrs.size() >= GPU_FILTER_THRESHOLD) {
+        gpu_calls++;
+        // Lazy init GPU filter
+        if (!gpu_filter_initialized_) {
+            gpu_candidate_filter_.Init(data_.vlabels_.data(), data_.NumVertices());
+            gpu_filter_initialized_ = true;
+        }
+
+        // Build the filtering task
+        CandidateFilterTask task;
+        task.candidates = u_min_nbrs.data();
+        task.candidate_elabels = u_min_nbr_labels.data();
+        task.num_candidates = static_cast<uint32_t>(u_min_nbrs.size());
+        task.expected_vlabel = query_.GetVertexLabel(u);
+        task.expected_elabel = u_min_label;
+
+        // Build joinability constraints
+        std::vector<uint32_t> flat_nbrs_buf;
+        std::vector<uint32_t> flat_elabels_buf;
+        task.num_constraints = 0;
+
+        for (uint j = 0u; j < q_nbrs.size(); j++) {
+            const uint u_other = q_nbrs[j];
+            if (m[u_other] == UNMATCHED || u_other == u_min) continue;
+
+            const auto& nbrs_j = data_.GetNeighbors(m[u_other]);
+            const auto& elabs_j = data_.GetNeighborLabels(m[u_other]);
+
+            auto& c = task.constraints[task.num_constraints];
+            c.constraint_vertex = m[u_other];
+            c.expected_elabel = q_nbr_labels[j];
+            c.nbr_offset = static_cast<uint32_t>(flat_nbrs_buf.size());
+            c.nbr_size = static_cast<uint32_t>(nbrs_j.size());
+
+            flat_nbrs_buf.insert(flat_nbrs_buf.end(), nbrs_j.begin(), nbrs_j.end());
+            flat_elabels_buf.insert(flat_elabels_buf.end(), elabs_j.begin(), elabs_j.end());
+
+            task.num_constraints++;
+            if (task.num_constraints >= MAX_JOIN_CONSTRAINTS) break;
+        }
+
+        task.flat_nbrs = flat_nbrs_buf.data();
+        task.flat_elabels = flat_elabels_buf.data();
+        task.flat_nbrs_total = static_cast<uint32_t>(flat_nbrs_buf.size());
+
+        // Build visited set
+        std::vector<uint32_t> visited_verts;
+        if (!homomorphism_) {
+            for (uint vi = 0; vi < static_cast<uint>(m.size()); vi++) {
+                if (m[vi] != UNMATCHED) {
+                    visited_verts.push_back(m[vi]);
+                }
+            }
+        }
+        task.visited_vertices = visited_verts.data();
+        task.num_visited = static_cast<uint32_t>(visited_verts.size());
+        task.check_visited = !homomorphism_;
+
+        // Run GPU filter
+        std::vector<uint32_t> valid_indices(u_min_nbrs.size());
+        uint32_t num_valid = gpu_candidate_filter_.FilterCandidates(task, valid_indices.data());
+
+        // Process valid candidates (same Layer 2 expansion logic as CPU path)
+        layer1_groups_.clear();
+        layer2_indices_.clear();
+        for (uint32_t vii = 0; vii < num_valid; vii++) {
+            uint idx_valid = valid_indices[vii];
+            const uint v = u_min_nbrs[idx_valid];
+
+            m[u] = v;
+            visited_[v] = true;
+            for (size_t i5 = 0; i5 < local_vec_visited_local.size(); i5++) {
+                local_vec_visited_local[i5][v] = true;
+            }
+
+            if (depth == query_.NumVertices() - 1) {
+                num_results++;
+            } else {
+                auto depth2 = depth + 1;
+                uint u2 = order_vs_[order_index][depth2];
+                uint u_min2 = NOT_EXIST;
+                uint u_min_label2 = NOT_EXIST;
+                uint u_min_size2 = UINT_MAX;
+
+                const auto& q_nbrs2 = query_.GetNeighbors(u2);
+
+                for (uint i2 = 0u; i2 < q_nbrs2.size(); i2++) {
+                    const uint u_other2 = q_nbrs2[i2];
+                    const uint u_other_label2 = q_nbr_labels[i2];
+
+                    if (m[u_other2] == UNMATCHED) continue;
+
+                    const uint cur_can_size2 = data_.GetNeighbors(m[u_other2]).size();
+                    if (cur_can_size2 < u_min_size2) {
+                        u_min_size2 = cur_can_size2;
+                        u_min2 = u_other2;
+                        u_min_label2 = u_other_label2;
+                    }
+                }
+
+                const auto& u_min_nbrs2 = data_.GetNeighbors(m[u_min2]);
+
+                Layer1Group grp;
+                grp.v = v;
+                grp.u = u;
+                grp.u_min2 = u_min2;
+                grp.u_min_label2 = u_min_label2;
+                grp.start = layer2_indices_.size();
+                grp.count = u_min_nbrs2.size();
+                layer1_groups_.push_back(grp);
+
+                for (uint i2 = 0u; i2 < u_min_nbrs2.size(); i2++) {
+                    layer2_indices_.push_back(i2);
+                }
+            }
+
+            for (size_t i5 = 0; i5 < local_vec_visited_local.size(); i5++) {
+                local_vec_visited_local[i5][v] = false;
+            }
+            visited_[v] = false;
+            m[u] = UNMATCHED;
+        }
+
+        // Fall through to the unified parallel dispatch below
+    } else {
+        cpu_calls++;
+    }
+    // ---- End GPU path ----
+
+    // ---- Optimized CPU path: use layer1_groups to avoid per-entry m copy ----
+    layer1_groups_.clear();
+    layer2_indices_.clear();
+
     for (uint i = 0u; i < u_min_nbrs.size(); i++)
     {
         const uint v = u_min_nbrs[i];
@@ -1266,24 +1405,21 @@ void Parallel_Graphflow::Parallel_FindMatches2(uint order_index, uint depth, std
         }
         else
         {
-            // FindMatches(order_index, depth + 1, m, num_results);
             auto depth2 = depth + 1;
             uint u2 = order_vs_[order_index][depth2];
             uint u_min2 = NOT_EXIST;
             uint u_min_label2 = NOT_EXIST;
             uint u_min_size2 = UINT_MAX;
-        
-            // find u_min
+
             const auto& q_nbrs2 = query_.GetNeighbors(u2);
-            // const auto& q_nbr_labels2 = query_.GetNeighborLabels(u2);
 
             for (uint i2 = 0u; i2 < q_nbrs2.size(); i2++)
             {
                 const uint u_other2 = q_nbrs2[i2];
                 const uint u_other_label2 = q_nbr_labels[i2];
-        
+
                 if (m[u_other2] == UNMATCHED) continue;
-        
+
                 const uint cur_can_size2 = data_.GetNeighbors(m[u_other2]).size();
                 if (cur_can_size2 < u_min_size2)
                 {
@@ -1294,23 +1430,24 @@ void Parallel_Graphflow::Parallel_FindMatches2(uint order_index, uint depth, std
             }
 
             const auto& u_min_nbrs2 = data_.GetNeighbors(m[u_min2]);
-            // const auto& u_min_nbr_labels2 = data_.GetNeighborLabels(m[u_min2]);
+
+            // Record layer1 group: one group per valid layer-1 candidate
+            Layer1Group grp;
+            grp.v = v;
+            grp.u = u;
+            grp.u_min2 = u_min2;
+            grp.u_min_label2 = u_min_label2;
+            grp.start = layer2_indices_.size();
+            grp.count = u_min_nbrs2.size();
+            layer1_groups_.push_back(grp);
 
             for (uint i2 = 0u; i2 < u_min_nbrs2.size(); i2++)
             {
-
-                vertex_vector.emplace_back(v,  u_min2, u_min_label2,
-                  m, i2
-                );
-
-                // ProcessNeighbor(u2, u_min2, u_min_label2,
-                //     order_index, depth2, m, num_results, 
-                //      i2);
+                layer2_indices_.push_back(i2);
             }
-
         }
 
-        
+
         for(size_t i5 = 0; i5< local_vec_visited_local.size(); i5++){
             local_vec_visited_local[i5][v] = false;
         }
@@ -1318,24 +1455,35 @@ void Parallel_Graphflow::Parallel_FindMatches2(uint order_index, uint depth, std
         m[u] = UNMATCHED;
     }
 
-    // Adaptive: skip parallel when too few tasks — sequential is faster.
-    // Analysis: 50-72% of PFM2 calls have vv<=10 but contribute <6% of tasks.
-    // Dense queries (many edges) have more PFM2 calls with less work each,
-    // making OMP overhead dominate. Use higher threshold for denser queries.
+    {
+    // Build a flat task list from layer1_groups for parallel dispatch
+    // Each task = (group_index, layer2_offset_within_group)
+    // But for load balancing, we flatten into individual tasks
+    size_t total_tasks = 0;
+    for (auto& g : layer1_groups_) total_tasks += g.count;
+
+    // Adaptive: skip parallel when too few tasks
     const size_t VV_SEQ_THRESHOLD = NUMTHREAD * std::max<size_t>(2,
         query_.NumEdges() / 3);
-    if (vertex_vector.size() <= VV_SEQ_THRESHOLD) {
-        // Process sequentially: avoid omp overhead entirely
-        for (size_t t_1 = 0; t_1 < vertex_vector.size(); t_1++) {
-            auto& [v3, u_min3, u_min_label3, m2, i2] = vertex_vector[t_1];
-            uint u2 = order_vs_[order_index][depth+1];
-            local_vec_visited_local[0][v3] = true;
-            m2[u2] = v3;
-            ProcessNeighbor(u2, u_min3, u_min_label3,
-                order_index, depth+1, m2,
-                local_num_result[0], i2, 0);
-            local_vec_visited_local[0][v3] = false;
-            m2[u2] = UNMATCHED;
+
+    if (total_tasks <= VV_SEQ_THRESHOLD) {
+        // Sequential path: avoid OMP overhead
+        uint u2 = order_vs_[order_index][depth+1];
+        for (auto& grp : layer1_groups_) {
+            auto& my_m = tl_m_[0];
+            std::copy(m.begin(), m.end(), my_m.begin());
+            my_m[grp.u] = grp.v;
+            local_vec_visited_local[0][grp.v] = true;
+
+            for (size_t li = 0; li < grp.count; li++) {
+                uint i2 = layer2_indices_[grp.start + li];
+                ProcessNeighbor(u2, grp.u_min2, grp.u_min_label2,
+                    order_index, depth+1, my_m,
+                    local_num_result[0], i2, 0);
+            }
+
+            local_vec_visited_local[0][grp.v] = false;
+            my_m[grp.u] = UNMATCHED;
         }
         for (size_t i = 0; i < local_num_result.size(); ++i) {
             num_results += local_num_result[i];
@@ -1343,76 +1491,36 @@ void Parallel_Graphflow::Parallel_FindMatches2(uint order_index, uint depth, std
         return;
     }
 
-    // if(auto_tuning == 1){
-        if(vertex_vector.size() < NUMT){
-            if(vertex_vector.size() == 0){
-                NUMT = 1;
-            }
-            else{
-                NUMT = vertex_vector.size();
-            }
-        }
-    // }
+    // Parallel path: distribute layer1_groups across threads
+    // Each group is one atomic work unit (all its layer-2 tasks run on same thread)
+    size_t num_groups = layer1_groups_.size();
+    if (num_groups < NUMT) {
+        NUMT = (num_groups == 0) ? 1 : num_groups;
+    }
 
-    // if(auto_tuning == 1){
-    //     if(vertex_vector.size() > NUMT){
-    //         NUMT = vertex_vector.size();
-    //     }
-    // }
-
-// ok
     #pragma omp parallel for num_threads(NUMT) schedule(dynamic, 1)
-    for(size_t t_1 = 0; t_1 < vertex_vector.size(); t_1 ++){
-
+    for (size_t gi = 0; gi < num_groups; gi++) {
         size_t thread_id = omp_get_thread_num();
-        // auto m3 = m ;
-        auto& [v3,  u_min3, u_min_label3,  m2,  i2] = vertex_vector[t_1];
-        //             no
-        //  v3 = u_min_nbrs[i2];
-        // uint v = u_min_nbrs[i2];
+        auto& grp = layer1_groups_[gi];
         uint u2 = order_vs_[order_index][depth+1];
 
-        // auto m3 = m;
-        local_vec_visited_local[thread_id][v3] = true;
-        // visited_[v3] = true;
-        m2[u2] = v3;
-        // m3[u2] = v3;
+        // Use pre-allocated thread-local m: copy base_m once per group
+        auto& my_m = tl_m_[thread_id];
+        std::copy(m.begin(), m.end(), my_m.begin());
+        my_m[grp.u] = grp.v;
+        local_vec_visited_local[thread_id][grp.v] = true;
 
-        ProcessNeighbor(u2, u_min3, u_min_label3,
-            order_index, depth+1, m2,
-            local_num_result[thread_id], 
-            i2, thread_id);
-        // ProcessCandidate(u3, v3, u_min3, u_min_label3, i,
-        //     q_nbrs3, q_nbr_labels3,
-        //     u_min_nbr_labels3,
-        //     m2,
-        //     depth3,
-        //     order_index,
-        //     num_results);
-        // visited_[v3] = false;
-        local_vec_visited_local[thread_id][v3] = false;
-        // visited_[u_min3] = true;
-        m2[u2] = UNMATCHED;
-        // m3[u2] = UNMATCHED;
-
-        // for task spilt
-        if(!job_queue.empty() && (t_1 > vertex_vector.size() - NUMT)){
-            std::tuple<uint, uint, uint,  std::vector<uint>,  uint >job;
-            if(job_queue.try_pop(job)){
-                size_t thread_id = omp_get_thread_num();
-                auto& [v3,  u_min3, u_min_label3,  m2,  i2] = job;
-                local_vec_visited_local[thread_id][v3] = true;
-                m2[u] = v3;
-                // uint u2 = order_vs_[order_index][depth+1];
-                ProcessNeighbor_queue(u2, u_min3, u_min_label3,
-                    order_index, depth+1, m2,
-                    local_num_result[thread_id], 
-                    i2, thread_id);
-                // Process_vertex_queue
-                local_vec_visited_local[thread_id][v3] = false; 
-                m2[u] = UNMATCHED;
-            }
+        // Process all layer-2 tasks in this group
+        for (size_t li = 0; li < grp.count; li++) {
+            uint i2 = layer2_indices_[grp.start + li];
+            ProcessNeighbor(u2, grp.u_min2, grp.u_min_label2,
+                order_index, depth+1, my_m,
+                local_num_result[thread_id], i2, thread_id);
         }
+
+        local_vec_visited_local[thread_id][grp.v] = false;
+        my_m[grp.u] = UNMATCHED;
+    }
     }
 
     for (size_t i = 0; i < local_num_result.size(); ++i) {
@@ -2296,9 +2404,9 @@ void Parallel_Graphflow::Process_vertex_queue(uint order_index, uint depth, std:
  * This approach enables dynamic load balancing by allowing threads to steal work
  * from the shared queue when they become idle.
  */
-inline bool Parallel_Graphflow::ProcessNeighbor_queue(
-    // uint v,                       
-    uint u,                     
+bool Parallel_Graphflow::ProcessNeighbor_queue(
+    // uint v,
+    uint u,
     uint u_min,                    
     uint u_min_label,              
     uint order_index,            
@@ -2688,6 +2796,8 @@ bool Parallel_Graphflow::Classify(uint v1, uint v2, uint label){
 void Parallel_Graphflow::AddEdge(uint v1, uint v2, uint label)
 {
     data_.AddEdge(v1, v2, label);
+    gpu_search_csr_dirty_ = true;
+    gpu_search_dirty_edges_.push_back({v1, v2});
 
     std::vector<uint> m(query_.NumVertices(), UNMATCHED);
 

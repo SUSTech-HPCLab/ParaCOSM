@@ -5,6 +5,8 @@
 #include <atomic>
 #include "matching_executor/matching.h"
 #include "graph_storage/graph.h"
+#include "core/gpu/gpu_classifier.h"
+#include "core/gpu/gpu_search.h"
 
 // Forward declaration
 struct InsertUnit;
@@ -20,6 +22,14 @@ private:
     Graph& data_graph_;
     matching* matching_instance_;
     
+    // GPU classifier (optional, initialized on demand)
+    GPUClassifier gpu_classifier_;
+    bool gpu_initialized_ = false;
+
+    // GPU search engine for inter-update batch enumeration
+    GPUSearchEngine gpu_search_engine_;
+    bool gpu_search_ready_ = false;
+
     // Configuration constants
     static constexpr size_t DEFAULT_WINDOW_SIZE = 16;
     
@@ -248,6 +258,46 @@ public:
         std::atomic_bool& reach_time_limit,
         size_t num_threads = 8
     );
+
+    /**
+     * @brief GPU-accelerated inter-update batch processing.
+     *
+     * Same as BatchUpdates_AllAtOnce but the match enumeration phase runs
+     * entirely on GPU: builds CSR once, then launches one GPU thread per
+     * (unsafe_edge × query_edge × direction).
+     */
+    void BatchUpdates_GPU_AllAtOnce(
+        size_t& num_v_updates,
+        size_t& num_e_updates,
+        size_t& unsafe_updates,
+        size_t& count,
+        size_t& positive_num_results_last,
+        size_t& negative_num_results_last,
+        std::atomic_bool& reach_time_limit
+    );
+
+    /**
+     * @brief GPU-accelerated batch processing with large sliding window.
+     *
+     * Uses CUDA to classify edges in bulk on the GPU, then processes the
+     * first unsafe edge on CPU. This is Phase 1 of the CPU-GPU cooperative
+     * CSM pipeline.
+     */
+    void BatchUpdates_GPU(
+        size_t& num_v_updates,
+        size_t& num_e_updates,
+        size_t& unsafe_updates,
+        size_t& count,
+        size_t& positive_num_results_last,
+        size_t& negative_num_results_last,
+        std::atomic_bool& reach_time_limit,
+        size_t window_size = 1024
+    );
+
+    /**
+     * @brief Initialize GPU classifier from current query/data graph state.
+     */
+    void InitGPUClassifier();
 
     /**
      * DegreePruning
