@@ -9,9 +9,9 @@ set(CMAKE_CXX_COMPILER ${INTEL_COMPILER_ROOT}/bin/icpx)
 set(CMAKE_LINKER ${INTEL_COMPILER_ROOT}/bin/icpx)
 
 # -----------------------------
-# 2. Project declaration
+# 2. Project declaration (CXX + CUDA)
 # -----------------------------
-project(CSM LANGUAGES CXX)
+project(CSM LANGUAGES CXX CUDA)
 
 # -----------------------------
 # 3. Compilation options
@@ -19,13 +19,18 @@ project(CSM LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Common optimizations and warnings
+# CUDA settings
+set(CMAKE_CUDA_STANDARD 17)
+set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+set(CMAKE_CUDA_ARCHITECTURES 80)  # A100
+
+# Common optimizations and warnings (CXX only)
 add_compile_options(
-    -g
-    -O3
-    -Wall
-    -Wno-unused-command-line-argument
-    -qopenmp
+    $<$<COMPILE_LANGUAGE:CXX>:-g>
+    $<$<COMPILE_LANGUAGE:CXX>:-O3>
+    $<$<COMPILE_LANGUAGE:CXX>:-Wall>
+    $<$<COMPILE_LANGUAGE:CXX>:-Wno-unused-command-line-argument>
+    $<$<COMPILE_LANGUAGE:CXX>:-qopenmp>
 )
 
 # -----------------------------
@@ -56,6 +61,12 @@ find_package(OpenMP REQUIRED)
 if(OpenMP_CXX_FOUND)
     message(STATUS "Found OpenMP: ${OpenMP_CXX_FLAGS}")
 endif()
+
+# -----------------------------
+# 5b. CUDA Toolkit
+# -----------------------------
+find_package(CUDAToolkit REQUIRED)
+message(STATUS "Found CUDA Toolkit: ${CUDAToolkit_VERSION}")
 
 # -----------------------------
 # 6. Source files
@@ -99,6 +110,10 @@ set(SRC_FILES
     # core/FindMatchesKernel_simplified.cpp
     core/inner_executor/inner_executor.cpp
     core/inter_executor/inter_executor.cpp
+
+    core/gpu/gpu_classifier.cu
+    core/gpu/gpu_candidate_filter.cu
+    core/gpu/gpu_search.cu
 )
 
 # -----------------------------
@@ -113,6 +128,12 @@ target_link_libraries(csm PRIVATE
     tbb
     pthread
     iomp5   # Intel OpenMP runtime
+    CUDA::cudart
+)
+
+# Allow .cu files to include project headers
+set_source_files_properties(core/gpu/gpu_classifier.cu PROPERTIES
+    COMPILE_OPTIONS "-O3"
 )
 
 # Set rpath so runtime can find Intel OpenMP libraries

@@ -4,6 +4,8 @@
 #include <queue>
 #include <unordered_map>
 #include <vector>
+#include <atomic>
+#include <memory>
 
 #include "graph_storage/graph.h"
 #include "matching_executor/matching.h"
@@ -31,9 +33,7 @@ private:
     std::vector<std::vector<uint>> order_vs_;
     std::vector<std::vector<uint>> backward_vs_;
 
-    std::vector<bool> workers_free;
-
-    bool all_finish = false;
+    std::atomic<int> active_workers_{0};
 
     std::vector<std::vector<std::vector<uint>>> join_check_vs_;
     std::vector<std::vector<std::vector<uint>>> join_check_labels_;
@@ -73,11 +73,29 @@ private:
     std::queue<std::pair<uint, uint>> Q1;
     std::queue<std::pair<uint, uint>> Q2;
 
-    std::vector< std::tuple<uint, uint, size_t, std::vector<uint>,
-      uint> > vertex_vector;
+    // Lightweight work item: shares m snapshot via shared_ptr to avoid copies
+    struct WorkItem {
+        uint u;
+        uint u_min;
+        size_t v_idx;
+        std::shared_ptr<std::vector<uint>> m_snapshot;
+        uint parent_v;  // the v that was matched at the parallelization layer
+    };
+    std::vector<WorkItem> vertex_vector;
 
-    tbb::concurrent_queue<std::tuple<uint, uint, size_t, std::vector<uint>,
-    uint , uint> > job_queue;
+    // Job queue also uses shared_ptr to avoid deep-copying m
+    struct StealJob {
+        uint u;
+        uint u_min;
+        size_t v_idx;
+        std::shared_ptr<std::vector<uint>> m_snapshot;
+        uint depth;
+        uint parent_v;
+    };
+    tbb::concurrent_queue<StealJob> job_queue;
+
+    // Pre-allocated per-call result buffer
+    std::vector<size_t> local_num_result_;
 
 public:
 

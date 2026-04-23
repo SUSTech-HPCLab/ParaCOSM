@@ -1,0 +1,7 @@
+query,edges,serial_ms,parallel_ms,speedup,pos_serial,pos_parallel,neg_serial,neg_parallel,status
+Q_gen_001,9,skip,timeout,N/A,skip,?,skip,?,PAR_TIMEOUT
+Q_gen_002,8,skip,timeout,N/A,skip,?,skip,?,PAR_TIMEOUT
+Q_gen_003,20,skip,timeout,N/A,skip,?,skip,?,PAR_TIMEOUT
+Q_gen_004,15,skip,timeout,N/A,skip,?,skip,?,PAR_TIMEOUT
+Q_gen_005,14,skip,timeout,N/A,skip,?,skip,?,PAR_TIMEOUT
+Q_gen_006,10,skip,timeout,N/A,skip,?,skip,?,PAR_TIMEOUT

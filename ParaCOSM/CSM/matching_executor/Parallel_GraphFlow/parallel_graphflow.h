@@ -12,6 +12,8 @@
 #include "utils/types.h"
 #include "graph_storage/graph.h"
 #include "matching_executor/matching.h"
+#include "core/gpu/gpu_candidate_filter.h"
+#include "core/gpu/gpu_search.h"
 
 
 
@@ -25,15 +27,49 @@ private:
     std::vector<std::vector<uint>> local_vec_m;
     std::vector<std::vector<bool>> local_vec_visited_local;
 
+    // Legacy vertex_vector (used by non-optimized paths)
     std::vector< std::tuple<
-    uint,                // v 
+    uint,                // v
     uint,                // u_min
-    uint,               // u_min_label 
-    std::vector<uint>,   // m 
-    uint                 // i 
+    uint,               // u_min_label
+    std::vector<uint>,   // m
+    uint                 // i
     > > vertex_vector;
 
     tbb::concurrent_queue< std::tuple<uint, uint, uint,  std::vector<uint>,  uint > > job_queue;
+
+    // ---- Optimized Layer1Group structure (avoids per-entry m copy) ----
+    struct Layer1Group {
+        uint v;              // layer-1 data vertex mapped to u
+        uint u;              // layer-1 query vertex
+        uint u_min2;         // layer-2 u_min
+        uint u_min_label2;   // layer-2 u_min_label
+        size_t start;        // start index in layer2_indices_
+        size_t count;        // number of layer-2 entries
+    };
+    std::vector<Layer1Group> layer1_groups_;
+    std::vector<uint> layer2_indices_;  // flat array of layer-2 neighbor indices
+
+    // Thread-local pre-allocated m vectors (avoids heap allocation per task)
+    std::vector<std::vector<uint>> tl_m_;  // [max_threads][query_vertices]
+
+    // Precomputed u_min info per (order_index, depth) to avoid re-deriving in FindMatches_local.
+    // precomp_u_min_[order_index][depth] = (u_min_query_neighbor_index, u_min_query_vertex)
+    // Computed during GenerateMatchingOrder; NOT valid when mapping changes candidate sizes.
+    // For Graphflow u_min depends on runtime m[] mapping, so we cache query topology only.
+    // order_nbr_of_[order_index][depth] = list of query neighbors of order_vs_[order_index][depth]
+    //   that appear BEFORE depth in the order (i.e., already matched)
+    struct DepthNbrInfo {
+        uint u;           // query vertex at this depth
+        std::vector<uint> matched_nbrs;       // q_nbrs indices where m[q_nbrs[j]] != UNMATCHED
+        std::vector<uint> matched_nbr_labels; // corresponding edge labels
+    };
+    std::vector<std::vector<DepthNbrInfo>> order_depth_info_; // [order_index][depth]
+
+    // PF2 call statistics
+    size_t pf2_calls_ = 0, pf2_seq_ = 0, pf2_par_ = 0;
+    size_t pf2_total_groups_ = 0, pf2_total_tasks_ = 0;
+    size_t pf2_max_groups_ = 0, pf2_max_tasks_ = 0;
 
     struct StealWork {
         std::vector<uint> m;
@@ -62,6 +98,18 @@ private:
     size_t NUMTHREAD;
     size_t auto_tuning;
 
+    // GPU candidate filter for Layer 1 acceleration
+    GPUCandidateFilter gpu_candidate_filter_;
+    bool gpu_filter_initialized_ = false;
+    static constexpr size_t GPU_FILTER_THRESHOLD = 1024;  // min candidates to use GPU
+
+    // GPU DFS search engine for deep recursion acceleration
+    GPUSearchEngine gpu_search_engine_;
+    bool gpu_search_initialized_ = false;
+    bool gpu_search_csr_dirty_ = true;
+    std::vector<std::pair<uint32_t, uint32_t>> gpu_search_dirty_edges_;
+    static constexpr size_t GPU_DFS_THRESHOLD = 2000;  // min vertex_vector size to use GPU DFS
+
 
 public:
     Parallel_Graphflow(Graph& query_graph, Graph& data_graph, uint max_num_results,
@@ -70,6 +118,7 @@ public:
         pool_shutdown_.store(true, std::memory_order_release);
         pool_epoch_.fetch_add(1, std::memory_order_release);
         for (auto& w : pool_workers_) w.join();
+        DumpPF2Stats();
     };
 
     void Preprocessing() override;
@@ -79,6 +128,10 @@ public:
 
     void AddEdge(uint v1, uint v2, uint label) override;
     void RemoveEdge(uint v1, uint v2) override;
+
+    const std::vector<std::vector<uint>>& GetMatchingOrders() const override {
+        return order_vs_;
+    }
 
     /**
      * @brief Enumerate matches for an edge already in the graph (thread-safe).
@@ -105,6 +158,9 @@ public:
     void RemoveVertex(uint id) override;
     
     void GetMemoryCost(size_t &num_edges, size_t &num_vertices) override;
+
+    // Dump PF2 call statistics (called from destructor)
+    void DumpPF2Stats();
 
 private:
     void GenerateMatchingOrder();
@@ -179,7 +235,7 @@ private:
         // , size_t thread_id
     );
 
-    inline bool ProcessNeighbor_queue(
+    bool ProcessNeighbor_queue(
         // uint v,                       
         uint u,                     
         uint u_min,                    
@@ -193,9 +249,9 @@ private:
         , size_t thread_id
     );
 
-    void FindMatches_local_m(uint order_index, uint depth, std::vector<uint> m, size_t &num_results);
+    void FindMatches_local_m(uint order_index, uint depth, std::vector<uint>& m, size_t &num_results);
 
-    void FindMatches_local(uint order_index, uint depth, std::vector<uint> m, size_t &num_results, size_t thread_id);
+    void FindMatches_local(uint order_index, uint depth, std::vector<uint>& m, size_t &num_results, size_t thread_id);
 
     // Work-splitting version: splits large subtrees into steal_queue_
     void FindMatches_local_splitting(uint order_index, uint depth,
