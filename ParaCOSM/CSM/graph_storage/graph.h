@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <queue>
 #include <tuple>
+#include <unordered_map>
 #include <vector>
 #include "utils/types.h"
 #include "utils/utils.h"
@@ -69,6 +70,9 @@ protected:
     uint elabel_count_;
     std::vector<std::vector<uint>> neighbors_;
     std::vector<std::vector<uint>> elabels_;
+    // Hash index for high-degree vertices: neighbor_id → edge_label
+    static constexpr uint HASH_DEGREE_THRESHOLD = 64;
+    std::vector<std::unordered_map<uint, uint>> hash_adj_;
 
 public:
     std::queue<InsertUnit> updates_;
@@ -97,6 +101,10 @@ public:
 
     /// Fast joinability check: is dst a neighbor of src with the given edge label?
     inline bool HasNeighborWithLabel(uint src, uint dst, uint label) const {
+        if (src < hash_adj_.size() && !hash_adj_[src].empty()) {
+            auto it = hash_adj_[src].find(dst);
+            return it != hash_adj_[src].end() && it->second == label;
+        }
         const auto& nbrs = neighbors_[src];
         auto it = std::lower_bound(nbrs.begin(), nbrs.end(), dst);
         if (it == nbrs.end() || *it != dst) return false;

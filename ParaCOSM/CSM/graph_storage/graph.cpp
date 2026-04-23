@@ -15,6 +15,7 @@ Graph::Graph()
 , elabel_count_(0)
 , neighbors_{}
 , elabels_{}
+, hash_adj_{}
 , updates_{}
 , updates_vec_{}
 , vlabels_{}
@@ -28,6 +29,7 @@ void Graph::AddVertex(uint id, uint label)
         vlabels_[id] = label;
         neighbors_.resize(id + 1);
         elabels_.resize(id + 1);
+        hash_adj_.resize(id + 1);
     }
     else if (vlabels_[id] == NOT_EXIST)
     {
@@ -53,22 +55,18 @@ void Graph::RemoveVertex(uint id)
     vlabels_[id] = NOT_EXIST;
     neighbors_[id].clear();
     elabels_[id].clear();
+    hash_adj_[id].clear();
 }
 
 void Graph::AddEdge(uint v1, uint v2, uint label)
 {
-    // Average using time: 1000ns
-    // // comsuming:
-    // // 先处理 v1 和 v2 的边
     auto lower = std::lower_bound(neighbors_[v1].begin(), neighbors_[v1].end(), v2);
-    if (lower != neighbors_[v1].end() && *lower == v2) return;  // 如果已经存在边，直接返回
-    
-    // 插入 v1 -> v2
+    if (lower != neighbors_[v1].end() && *lower == v2) return;
+
     size_t dis = std::distance(neighbors_[v1].begin(), lower);
-    // to emplace?
     neighbors_[v1].emplace(lower, v2);
     elabels_[v1].emplace(elabels_[v1].begin() + dis, label);
-    
+
     lower = std::lower_bound(neighbors_[v2].begin(), neighbors_[v2].end(), v1);
     dis = std::distance(neighbors_[v2].begin(), lower);
     neighbors_[v2].emplace(lower, v1);
@@ -77,19 +75,21 @@ void Graph::AddEdge(uint v1, uint v2, uint label)
     edge_count_++;
     elabel_count_ = std::max(elabel_count_, label + 1);
 
-
-
-    // print graph
-    /*std::cout << "labels: ";
-    for (uint i = 0; i < vlabels_.size(); i++)
-    {
-        std::cout << i << ":" << vlabels_[i] << " (";
-        for (uint j = 0; j < neighbors_[i].size(); j++)
-        {
-            std::cout << neighbors_[i][j] << ":" << elabels_[i][j] << " ";
+    // Maintain hash index for high-degree vertices
+    auto maybe_hash_insert = [&](uint v, uint nbr, uint lbl) {
+        if (neighbors_[v].size() > HASH_DEGREE_THRESHOLD) {
+            if (hash_adj_[v].empty()) {
+                // First time crossing threshold: bulk-build from vectors
+                hash_adj_[v].reserve(neighbors_[v].size() * 2);
+                for (size_t i = 0; i < neighbors_[v].size(); i++)
+                    hash_adj_[v][neighbors_[v][i]] = elabels_[v][i];
+            } else {
+                hash_adj_[v][nbr] = lbl;
+            }
         }
-        std::cout << ")" << std::endl;
-    }*/
+    };
+    maybe_hash_insert(v1, v2, label);
+    maybe_hash_insert(v2, v1, label);
 }
 
 void Graph::RemoveEdge(uint v1, uint v2)
@@ -102,7 +102,7 @@ void Graph::RemoveEdge(uint v1, uint v2)
     }
     neighbors_[v1].erase(lower);
     elabels_[v1].erase(elabels_[v1].begin() + std::distance(neighbors_[v1].begin(), lower));
-    
+
     lower = std::lower_bound(neighbors_[v2].begin(), neighbors_[v2].end(), v1);
     if (lower == neighbors_[v2].end() || *lower != v1)
     {
@@ -113,6 +113,17 @@ void Graph::RemoveEdge(uint v1, uint v2)
     elabels_[v2].erase(elabels_[v2].begin() + std::distance(neighbors_[v2].begin(), lower));
 
     edge_count_--;
+
+    // Maintain hash index
+    auto maybe_hash_erase = [&](uint v, uint nbr) {
+        if (!hash_adj_[v].empty()) {
+            hash_adj_[v].erase(nbr);
+            if (neighbors_[v].size() <= HASH_DEGREE_THRESHOLD)
+                hash_adj_[v].clear();
+        }
+    };
+    maybe_hash_erase(v1, v2);
+    maybe_hash_erase(v2, v1);
 }
 
 uint Graph::GetVertexLabel(uint u) const
