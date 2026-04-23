@@ -353,13 +353,7 @@ void Parallel_Graphflow::FindMatches(uint order_index, uint depth, std::vector<u
 
             if (m[u_other] == UNMATCHED || u_other == u_min) continue;
 
-            auto it = std::lower_bound(data_.GetNeighbors(m[u_other]).begin(), data_.GetNeighbors(m[u_other]).end(), v);
-            uint dis = std::distance(data_.GetNeighbors(m[u_other]).begin(), it);
-            if (
-                it == data_.GetNeighbors(m[u_other]).end() ||
-                *it != v ||
-                data_.GetNeighborLabels(m[u_other])[dis] != u_other_labels
-            ) {
+            if (!data_.HasNeighborWithLabel(m[u_other], v, u_other_labels)) {
                 joinable = false;
                 break;
             }
@@ -461,13 +455,7 @@ void Parallel_Graphflow::FindMatches_taskflow_local(
 
             if (m[u_other] == UNMATCHED || u_other == u_min) continue;
 
-            auto it = std::lower_bound(data_.GetNeighbors(m[u_other]).begin(), data_.GetNeighbors(m[u_other]).end(), v);
-            uint dis = std::distance(data_.GetNeighbors(m[u_other]).begin(), it);
-            if (
-                it == data_.GetNeighbors(m[u_other]).end() ||
-                *it != v ||
-                data_.GetNeighborLabels(m[u_other])[dis] != u_other_labels
-            ) {
+            if (!data_.HasNeighborWithLabel(m[u_other], v, u_other_labels)) {
                 joinable = false;
                 break;
             }
@@ -626,13 +614,7 @@ void Parallel_Graphflow::taskflow_findmatches_subflow(
             const uint u_other = q_nbrs[j];
             const uint u_other_labels = q_nbr_labels[j];
             if (m[u_other] == UNMATCHED || u_other == u_min) continue;
-            auto it = std::lower_bound(data_.GetNeighbors(m[u_other]).begin(), data_.GetNeighbors(m[u_other]).end(), v);
-            uint dis = std::distance(data_.GetNeighbors(m[u_other]).begin(), it);
-            if (
-                it == data_.GetNeighbors(m[u_other]).end() ||
-                *it != v ||
-                data_.GetNeighborLabels(m[u_other])[dis] != u_other_labels
-            )
+            if (!data_.HasNeighborWithLabel(m[u_other], v, u_other_labels))
             {
                 joinable = false;
                 break;
@@ -724,13 +706,7 @@ void Parallel_Graphflow::taskflow_findmatches(uint order_index, uint depth, std:
 
             if (m[u_other] == UNMATCHED || u_other == u_min) continue;
 
-            auto it = std::lower_bound(data_.GetNeighbors(m[u_other]).begin(), data_.GetNeighbors(m[u_other]).end(), v);
-            uint dis = std::distance(data_.GetNeighbors(m[u_other]).begin(), it);
-            if (
-                it == data_.GetNeighbors(m[u_other]).end() ||
-                *it != v ||
-                data_.GetNeighborLabels(m[u_other])[dis] != u_other_labels
-            ) {
+            if (!data_.HasNeighborWithLabel(m[u_other], v, u_other_labels)) {
                 joinable = false;
                 break;
             }
@@ -892,13 +868,7 @@ void Parallel_Graphflow::FindMatches_pure(uint order_index, uint depth, std::vec
 
             if (m[u_other] == UNMATCHED || u_other == u_min) continue;
 
-            auto it = std::lower_bound(data_.GetNeighbors(m[u_other]).begin(), data_.GetNeighbors(m[u_other]).end(), v);
-            uint dis = std::distance(data_.GetNeighbors(m[u_other]).begin(), it);
-            if (
-                it == data_.GetNeighbors(m[u_other]).end() ||
-                *it != v ||
-                data_.GetNeighborLabels(m[u_other])[dis] != u_other_labels
-            ) {
+            if (!data_.HasNeighborWithLabel(m[u_other], v, u_other_labels)) {
                 joinable = false;
                 break;
             }
@@ -1037,13 +1007,7 @@ void Parallel_Graphflow::Parallel_FindMatches(uint order_index, uint depth, std:
 
             if (m[u_other] == UNMATCHED || u_other == u_min) continue;
 
-            auto it = std::lower_bound(data_.GetNeighbors(m[u_other]).begin(), data_.GetNeighbors(m[u_other]).end(), v);
-            uint dis = std::distance(data_.GetNeighbors(m[u_other]).begin(), it);
-            if (
-                it == data_.GetNeighbors(m[u_other]).end() ||
-                *it != v ||
-                data_.GetNeighborLabels(m[u_other])[dis] != u_other_labels
-            ) {
+            if (!data_.HasNeighborWithLabel(m[u_other], v, u_other_labels)) {
                 joinable = false;
                 break;
             }
@@ -1188,6 +1152,9 @@ void Parallel_Graphflow::Parallel_FindMatches(uint order_index, uint depth, std:
  */
 void Parallel_Graphflow::Parallel_FindMatches2(uint order_index, uint depth, std::vector<uint> m, size_t &num_results)
 {
+    // Lightweight call statistics
+    pf2_calls_++;
+
     size_t NUMT = NUMTHREAD;
     std::vector<size_t> local_num_result(NUMT+2,0);
 
@@ -1370,13 +1337,7 @@ void Parallel_Graphflow::Parallel_FindMatches2(uint order_index, uint depth, std
 
             if (m[u_other] == UNMATCHED || u_other == u_min) continue;
 
-            auto it = std::lower_bound(data_.GetNeighbors(m[u_other]).begin(), data_.GetNeighbors(m[u_other]).end(), v);
-            uint dis = std::distance(data_.GetNeighbors(m[u_other]).begin(), it);
-            if (
-                it == data_.GetNeighbors(m[u_other]).end() ||
-                *it != v ||
-                data_.GetNeighborLabels(m[u_other])[dis] != u_other_labels
-            ) {
+            if (!data_.HasNeighborWithLabel(m[u_other], v, u_other_labels)) {
                 joinable = false;
                 break;
             }
@@ -1450,20 +1411,31 @@ void Parallel_Graphflow::Parallel_FindMatches2(uint order_index, uint depth, std
     for (auto& g : layer1_groups_) total_tasks += g.count;
 
     // Adaptive: skip parallel when too few tasks
+    // OMP fork/join costs ~10-50μs; each task needs enough DFS work to amortize.
+    // Empirically: need ≥ 64 tasks (or more for shallow queries) to benefit.
     const size_t VV_SEQ_THRESHOLD = NUMTHREAD * std::max<size_t>(2,
         query_.NumEdges() / 3);
 
+    // Track statistics
+    size_t num_groups = layer1_groups_.size();
+    pf2_total_groups_ += num_groups;
+    pf2_total_tasks_ += total_tasks;
+    if (num_groups > pf2_max_groups_) pf2_max_groups_ = num_groups;
+    if (total_tasks > pf2_max_tasks_) pf2_max_tasks_ = total_tasks;
+
     if (total_tasks <= VV_SEQ_THRESHOLD) {
-        // Sequential path: avoid OMP overhead
+        pf2_seq_++;
+        // Sequential path: use tl_m_[0] with per-group copy, avoid OMP overhead
         uint u2 = order_vs_[order_index][depth+1];
         for (auto& grp : layer1_groups_) {
             auto& my_m = tl_m_[0];
             std::copy(m.begin(), m.end(), my_m.begin());
             my_m[grp.u] = grp.v;
-            // Set visited for all mapped vertices
-            for (uint vi = 0; vi < static_cast<uint>(my_m.size()); vi++) {
-                if (my_m[vi] != UNMATCHED)
-                    local_vec_visited_local[0][my_m[vi]] = true;
+            // Mark base vertices + this group's vertex as visited in thread-0
+            // Base vertices are order_vs_[order_index][0..depth-1], already in m
+            for (uint d = 0; d < depth; d++) {
+                uint u_d = order_vs_[order_index][d];
+                local_vec_visited_local[0][my_m[u_d]] = true;
             }
             local_vec_visited_local[0][grp.v] = true;
 
@@ -1475,9 +1447,9 @@ void Parallel_Graphflow::Parallel_FindMatches2(uint order_index, uint depth, std
             }
 
             // Unset all visited
-            for (uint vi = 0; vi < static_cast<uint>(my_m.size()); vi++) {
-                if (my_m[vi] != UNMATCHED)
-                    local_vec_visited_local[0][my_m[vi]] = false;
+            for (uint d = 0; d < depth; d++) {
+                uint u_d = order_vs_[order_index][d];
+                local_vec_visited_local[0][my_m[u_d]] = false;
             }
             local_vec_visited_local[0][grp.v] = false;
             my_m[grp.u] = UNMATCHED;
@@ -1490,7 +1462,7 @@ void Parallel_Graphflow::Parallel_FindMatches2(uint order_index, uint depth, std
 
     // Parallel path: distribute layer1_groups across threads
     // Each group is one atomic work unit (all its layer-2 tasks run on same thread)
-    size_t num_groups = layer1_groups_.size();
+    pf2_par_++;
     if (num_groups < NUMT) {
         NUMT = (num_groups == 0) ? 1 : num_groups;
     }
@@ -1506,11 +1478,10 @@ void Parallel_Graphflow::Parallel_FindMatches2(uint order_index, uint depth, std
         std::copy(m.begin(), m.end(), my_m.begin());
         my_m[grp.u] = grp.v;
 
-        // Set visited for all already-mapped vertices + this group's vertex
-        // (replaces expensive broadcast from AddEdge)
-        for (uint vi = 0; vi < static_cast<uint>(my_m.size()); vi++) {
-            if (my_m[vi] != UNMATCHED)
-                local_vec_visited_local[thread_id][my_m[vi]] = true;
+        // Set visited for base vertices + this group's vertex
+        for (uint d = 0; d < depth; d++) {
+            uint u_d = order_vs_[order_index][d];
+            local_vec_visited_local[thread_id][my_m[u_d]] = true;
         }
         local_vec_visited_local[thread_id][grp.v] = true;
 
@@ -1522,10 +1493,10 @@ void Parallel_Graphflow::Parallel_FindMatches2(uint order_index, uint depth, std
                 local_num_result[thread_id], i2, thread_id);
         }
 
-        // Unset visited for all mapped vertices in this group
-        for (uint vi = 0; vi < static_cast<uint>(my_m.size()); vi++) {
-            if (my_m[vi] != UNMATCHED)
-                local_vec_visited_local[thread_id][my_m[vi]] = false;
+        // Unset visited for base vertices + this group's vertex
+        for (uint d = 0; d < depth; d++) {
+            uint u_d = order_vs_[order_index][d];
+            local_vec_visited_local[thread_id][my_m[u_d]] = false;
         }
         local_vec_visited_local[thread_id][grp.v] = false;
         my_m[grp.u] = UNMATCHED;
@@ -1534,6 +1505,18 @@ void Parallel_Graphflow::Parallel_FindMatches2(uint order_index, uint depth, std
 
     for (size_t i = 0; i < local_num_result.size(); ++i) {
         num_results += local_num_result[i];
+    }
+
+    // Print summary every 10000 calls
+    if (pf2_calls_ % 10000 == 0 && pf2_calls_ > 0) {
+        std::cerr << "[PF2 stats] calls=" << pf2_calls_
+                  << " seq=" << pf2_seq_ << " par=" << pf2_par_
+                  << " avg_groups=" << (pf2_calls_ ? pf2_total_groups_/pf2_calls_ : 0)
+                  << " avg_tasks=" << (pf2_calls_ ? pf2_total_tasks_/pf2_calls_ : 0)
+                  << " max_groups=" << pf2_max_groups_
+                  << " max_tasks=" << pf2_max_tasks_
+                  << " threshold=" << (NUMTHREAD * std::max<size_t>(2, query_.NumEdges()/3))
+                  << std::endl;
     }
 
 }
@@ -1610,16 +1593,7 @@ inline bool Parallel_Graphflow::ProcessNeighbor(
 
         if (m[u_other] == UNMATCHED || u_other == u_min) continue;
 
-        const auto& nbrs = data_.GetNeighbors(m[u_other]);
-        auto it = std::lower_bound(nbrs.begin(), nbrs.end(), v);
-        
-        if (it == nbrs.end() || *it != v) {
-            joinable = false;
-            break;
-        }
-
-        uint dis = std::distance(nbrs.begin(), it);
-        if (data_.GetNeighborLabels(m[u_other])[dis] != u_other_label) {
+        if (!data_.HasNeighborWithLabel(m[u_other], v, u_other_label)) {
             joinable = false;
             break;
         }
@@ -1678,9 +1652,7 @@ void Parallel_Graphflow::Parallel_FindMatches2_inner(uint order_index, uint dept
                 for (uint j = 0u; j < q_nbrs.size(); j++) {
                     uint uo2 = q_nbrs[j], ul2 = q_nbr_labels[j];
                     if (m[uo2] == UNMATCHED || uo2 == u_min) continue;
-                    auto it = std::lower_bound(data_.GetNeighbors(m[uo2]).begin(), data_.GetNeighbors(m[uo2]).end(), v);
-                    uint d2 = std::distance(data_.GetNeighbors(m[uo2]).begin(), it);
-                    if (it == data_.GetNeighbors(m[uo2]).end() || *it != v || data_.GetNeighborLabels(m[uo2])[d2] != ul2) { ok = false; break; }
+                    if (!data_.HasNeighborWithLabel(m[uo2], v, ul2)) { ok = false; break; }
                 }
                 if (!ok || (!homomorphism_ && visited_[v])) continue;
                 m[u] = v; visited_[v] = true;
@@ -1808,16 +1780,7 @@ inline bool Parallel_Graphflow::ProcessNeighbor_local(
 
         if (m[u_other] == UNMATCHED || u_other == u_min) continue;
 
-        const auto& nbrs = data_.GetNeighbors(m[u_other]);
-        auto it = std::lower_bound(nbrs.begin(), nbrs.end(), v);
-        
-        if (it == nbrs.end() || *it != v) {
-            joinable = false;
-            break;
-        }
-
-        uint dis = std::distance(nbrs.begin(), it);
-        if (data_.GetNeighborLabels(m[u_other])[dis] != u_other_label) {
+        if (!data_.HasNeighborWithLabel(m[u_other], v, u_other_label)) {
             joinable = false;
             break;
         }
@@ -1910,14 +1873,7 @@ inline bool Parallel_Graphflow::ProcessCandidate(
 
         if (m[u_other] == UNMATCHED || u_other == u_min) continue;
 
-        auto it = std::lower_bound(
-            data_.GetNeighbors(m[u_other]).begin(), 
-            data_.GetNeighbors(m[u_other]).end(), 
-            v);
-        uint dis = std::distance(data_.GetNeighbors(m[u_other]).begin(), it);
-        if (it == data_.GetNeighbors(m[u_other]).end() ||
-            *it != v ||
-            data_.GetNeighborLabels(m[u_other])[dis] != u_other_labels) {
+        if (!data_.HasNeighborWithLabel(m[u_other], v, u_other_labels)) {
             joinable = false;
             break;
         }
@@ -2041,13 +1997,7 @@ void Parallel_Graphflow::FindMatches_local(uint order_index, uint depth, std::ve
 
             if (m[u_other] == UNMATCHED || u_other == u_min) continue;
 
-            auto it = std::lower_bound(data_.GetNeighbors(m[u_other]).begin(), data_.GetNeighbors(m[u_other]).end(), v);
-            uint dis = std::distance(data_.GetNeighbors(m[u_other]).begin(), it);
-            if (
-                it == data_.GetNeighbors(m[u_other]).end() ||
-                *it != v ||
-                data_.GetNeighborLabels(m[u_other])[dis] != u_other_labels
-            ) {
+            if (!data_.HasNeighborWithLabel(m[u_other], v, u_other_labels)) {
                 joinable = false;
                 break;
             }
@@ -2126,11 +2076,7 @@ void Parallel_Graphflow::FindMatches_local_splitting(
             const uint u_other = q_nbrs[j];
             const uint u_other_label = q_nbr_labels[j];
             if (m[u_other] == UNMATCHED || u_other == u_min) continue;
-            const auto& nbrs = data_.GetNeighbors(m[u_other]);
-            auto it = std::lower_bound(nbrs.begin(), nbrs.end(), v);
-            uint dis = std::distance(nbrs.begin(), it);
-            if (it == nbrs.end() || *it != v ||
-                data_.GetNeighborLabels(m[u_other])[dis] != u_other_label) {
+            if (!data_.HasNeighborWithLabel(m[u_other], v, u_other_label)) {
                 joinable = false; break;
             }
         }
@@ -2284,13 +2230,7 @@ void Parallel_Graphflow::Process_vertex_queue(uint order_index, uint depth, std:
 
             if (m[u_other] == UNMATCHED || u_other == u_min) continue;
 
-            auto it = std::lower_bound(data_.GetNeighbors(m[u_other]).begin(), data_.GetNeighbors(m[u_other]).end(), v);
-            uint dis = std::distance(data_.GetNeighbors(m[u_other]).begin(), it);
-            if (
-                it == data_.GetNeighbors(m[u_other]).end() ||
-                *it != v ||
-                data_.GetNeighborLabels(m[u_other])[dis] != u_other_labels
-            ) {
+            if (!data_.HasNeighborWithLabel(m[u_other], v, u_other_labels)) {
                 joinable = false;
                 break;
             }
@@ -2449,16 +2389,7 @@ bool Parallel_Graphflow::ProcessNeighbor_queue(
 
         if (m[u_other] == UNMATCHED || u_other == u_min) continue;
 
-        const auto& nbrs = data_.GetNeighbors(m[u_other]);
-        auto it = std::lower_bound(nbrs.begin(), nbrs.end(), v);
-        
-        if (it == nbrs.end() || *it != v) {
-            joinable = false;
-            break;
-        }
-
-        uint dis = std::distance(nbrs.begin(), it);
-        if (data_.GetNeighborLabels(m[u_other])[dis] != u_other_label) {
+        if (!data_.HasNeighborWithLabel(m[u_other], v, u_other_label)) {
             joinable = false;
             break;
         }
@@ -2623,13 +2554,7 @@ void Parallel_Graphflow::FindMatches_local_m(uint order_index, uint depth, std::
 
             if (m[u_other] == UNMATCHED || u_other == u_min) continue;
 
-            auto it = std::lower_bound(data_.GetNeighbors(m[u_other]).begin(), data_.GetNeighbors(m[u_other]).end(), v);
-            uint dis = std::distance(data_.GetNeighbors(m[u_other]).begin(), it);
-            if (
-                it == data_.GetNeighbors(m[u_other]).end() ||
-                *it != v ||
-                data_.GetNeighborLabels(m[u_other])[dis] != u_other_labels
-            ) {
+            if (!data_.HasNeighborWithLabel(m[u_other], v, u_other_labels)) {
                 joinable = false;
                 break;
             }
@@ -3264,6 +3189,22 @@ void Parallel_Graphflow::GetMemoryCost(size_t &num_edges, size_t &num_vertices)
 {
     num_edges = 0ul;
     num_vertices = 0ul;
+}
+
+// Access the static counters from Parallel_FindMatches2 via extern-like trick:
+// We define a helper that accesses the same static variables.
+void Parallel_Graphflow::DumpPF2Stats()
+{
+    if (pf2_calls_ == 0) return;
+    std::cerr << "[PF2 final] calls=" << pf2_calls_
+              << " seq=" << pf2_seq_ << "(" << (100*pf2_seq_/pf2_calls_) << "%)"
+              << " par=" << pf2_par_ << "(" << (100*pf2_par_/pf2_calls_) << "%)"
+              << " avg_groups=" << pf2_total_groups_/pf2_calls_
+              << " avg_tasks=" << pf2_total_tasks_/pf2_calls_
+              << " max_groups=" << pf2_max_groups_
+              << " max_tasks=" << pf2_max_tasks_
+              << " threshold=" << (NUMTHREAD * std::max<size_t>(2, query_.NumEdges()/3))
+              << std::endl;
 }
 
 

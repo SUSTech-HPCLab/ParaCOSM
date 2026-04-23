@@ -1,6 +1,7 @@
 #ifndef GRAPH_GRAPH
 #define GRAPH_GRAPH
 
+#include <algorithm>
 #include <queue>
 #include <tuple>
 #include <vector>
@@ -93,6 +94,14 @@ public:
     const std::vector<uint>& GetNeighborLabels(uint v) const;
     uint GetDegree(uint v) const;
     std::tuple<uint, uint, uint> GetEdgeLabel(uint v1, uint v2) const;
+
+    /// Fast joinability check: is dst a neighbor of src with the given edge label?
+    inline bool HasNeighborWithLabel(uint src, uint dst, uint label) const {
+        const auto& nbrs = neighbors_[src];
+        auto it = std::lower_bound(nbrs.begin(), nbrs.end(), dst);
+        if (it == nbrs.end() || *it != dst) return false;
+        return elabels_[src][it - nbrs.begin()] == label;
+    }
 
     void LoadFromFile(const std::string &path);
     void LoadUpdateStream(const std::string &path);

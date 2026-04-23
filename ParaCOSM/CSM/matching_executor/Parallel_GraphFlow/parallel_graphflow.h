@@ -66,6 +66,11 @@ private:
     };
     std::vector<std::vector<DepthNbrInfo>> order_depth_info_; // [order_index][depth]
 
+    // PF2 call statistics
+    size_t pf2_calls_ = 0, pf2_seq_ = 0, pf2_par_ = 0;
+    size_t pf2_total_groups_ = 0, pf2_total_tasks_ = 0;
+    size_t pf2_max_groups_ = 0, pf2_max_tasks_ = 0;
+
     struct StealWork {
         std::vector<uint> m;
         std::vector<uint> ancestors;
@@ -113,6 +118,7 @@ public:
         pool_shutdown_.store(true, std::memory_order_release);
         pool_epoch_.fetch_add(1, std::memory_order_release);
         for (auto& w : pool_workers_) w.join();
+        DumpPF2Stats();
     };
 
     void Preprocessing() override;
@@ -152,6 +158,9 @@ public:
     void RemoveVertex(uint id) override;
     
     void GetMemoryCost(size_t &num_edges, size_t &num_vertices) override;
+
+    // Dump PF2 call statistics (called from destructor)
+    void DumpPF2Stats();
 
 private:
     void GenerateMatchingOrder();
