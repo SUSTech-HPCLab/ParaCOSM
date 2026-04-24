@@ -97,7 +97,7 @@ private:
     // Each partial match: [order_idx, m[0], ..., m[Q-1]] = (Q+1) uint32
     uint32_t* d_buf_a_ = nullptr;
     uint32_t* d_buf_b_ = nullptr;
-    static constexpr size_t MAX_BUF_MATCHES = 200'000'000;
+    static constexpr size_t MAX_BUF_MATCHES = 400'000'000;
 
     // Counters
     uint32_t* d_count_ = nullptr;
