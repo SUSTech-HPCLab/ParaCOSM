@@ -1563,20 +1563,30 @@ void InterExecutor::BatchUpdates_Versioned(
     matching_instance_->PrepareBatchEnumeration(num_threads);
 
     // ---- Phase 5: Search all unsafe edges in parallel (version-aware) ----
+    // Use task-based parallelism so that the matching kernel can fan out
+    // hot-edge sub-tasks (see Parallel_TurboFlux::EnumerateNewEdgeVersioned)
+    // and have other team threads pick them up. With `parallel for` the
+    // threads stay locked on their for-iterations and cannot help drain
+    // a single hot edge's huge first-layer fanout.
     auto t5 = std::chrono::high_resolution_clock::now();
     const size_t n_unsafe = unsafe_edges.size();
-    std::vector<size_t> thread_results(num_threads, 0);
+    std::atomic<size_t> total_positive{0};
 
     #pragma omp parallel num_threads(num_threads)
     {
-        size_t tid = omp_get_thread_num();
-        #pragma omp for schedule(dynamic, 1)
-        for (size_t k = 0; k < n_unsafe; k++) {
-            if (reach_time_limit) continue;
-            const auto& e = unsafe_edges[k];
-            size_t r = matching_instance_->EnumerateNewEdgeVersioned(
-                e.v1, e.v2, e.label, tid, e.timestamp);
-            thread_results[tid] += r;
+        #pragma omp single
+        {
+            for (size_t k = 0; k < n_unsafe; k++) {
+                #pragma omp task firstprivate(k) shared(total_positive, unsafe_edges)
+                {
+                    if (!reach_time_limit) {
+                        const auto& e = unsafe_edges[k];
+                        size_t r = matching_instance_->EnumerateNewEdgeVersioned(
+                            e.v1, e.v2, e.label, /*thread_id*/ omp_get_thread_num(), e.timestamp);
+                        if (r) total_positive.fetch_add(r, std::memory_order_relaxed);
+                    }
+                }
+            }
         }
     }
 
@@ -1584,11 +1594,8 @@ void InterExecutor::BatchUpdates_Versioned(
     double search_ms = std::chrono::duration_cast<std::chrono::microseconds>(t6 - t5).count() / 1000.0;
 
     // ---- Phase 6: Aggregate results ----
-    size_t total_positive = 0;
-    for (size_t t = 0; t < num_threads; t++) {
-        total_positive += thread_results[t];
-    }
-    matching_instance_->AddPositiveResults(total_positive);
+    size_t total_positive_v = total_positive.load();
+    matching_instance_->AddPositiveResults(total_positive_v);
 
     size_t pos_cur = 0, neg_cur = 0;
     matching_instance_->GetNumPositiveResults(pos_cur);
@@ -1613,7 +1620,7 @@ void InterExecutor::BatchUpdates_Versioned(
 
     std::cout << "[versioned] search: " << search_ms << " ms, "
               << "total: " << total_ms << " ms, "
-              << "positive: " << total_positive << std::endl;
+              << "positive: " << total_positive_v << std::endl;
 }
 
 // =====================================================================
@@ -1666,10 +1673,12 @@ void InterExecutor::BatchUpdates_GPU_BFS_Versioned(
     auto t2 = std::chrono::high_resolution_clock::now();
     double classify_ms = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count() / 1000.0;
 
-    // ---- Phase 2: Add ALL edges with timestamps ----
+    // ---- Phase 2: Add ALL edges with timestamps (parallel batch) ----
     auto t3 = std::chrono::high_resolution_clock::now();
 
+    std::vector<Graph::VersionedEdgeBatch> all_edges;
     std::vector<VersionedEdge> unsafe_edges;
+    all_edges.reserve(update_size);
     unsafe_edges.reserve(update_size / 10);
 
     uint32_t ts = 1;
@@ -1677,13 +1686,16 @@ void InterExecutor::BatchUpdates_GPU_BFS_Versioned(
         const auto& u = data_graph_.updates_vec_[i];
         if (u.type == 'e' && u.is_add) {
             num_e_updates++;
-            data_graph_.AddEdgeVersioned(u.id1, u.id2, u.label, ts);
+            all_edges.push_back({u.id1, u.id2, u.label, ts});
             if (update_type[i] == 1) {
                 unsafe_edges.push_back({u.id1, u.id2, u.label, ts});
             }
             ts++;
         }
     }
+    // Determine thread count from OMP environment.
+    size_t num_threads = static_cast<size_t>(omp_get_max_threads());
+    data_graph_.AddEdgesVersionedBatch(all_edges, num_threads);
 
     auto t4 = std::chrono::high_resolution_clock::now();
     double add_edges_ms = std::chrono::duration_cast<std::chrono::microseconds>(t4 - t3).count() / 1000.0;

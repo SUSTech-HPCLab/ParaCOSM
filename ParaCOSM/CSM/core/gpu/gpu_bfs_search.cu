@@ -5,6 +5,7 @@
 #include <cstring>
 #include <chrono>
 #include <algorithm>
+#include <omp.h>
 
 #define CUDA_CHECK(call)                                                       \
     do {                                                                       \
@@ -614,6 +615,7 @@ void GPUBFSSearch::BuildCSR_Versioned(const Graph& data) {
     uint32_t total = offsets[V];
 
     std::vector<uint32_t> neighbors(total), elabels(total), timestamps(total);
+    #pragma omp parallel for schedule(dynamic, 1024)
     for (uint32_t v = 0; v < V; v++) {
         const auto& nbrs = data.GetNeighbors(v);
         const auto& labs = data.GetNeighborLabels(v);

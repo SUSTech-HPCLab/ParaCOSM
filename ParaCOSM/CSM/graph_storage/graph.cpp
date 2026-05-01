@@ -1,10 +1,12 @@
 #include <algorithm>
+#include <atomic>
 #include <fstream>
 #include <iostream>
 #include <queue>
 #include <sstream>
 #include <tuple>
 #include <vector>
+#include <omp.h>
 #include "utils/types.h"
 #include "utils/utils.h"
 #include "graph_storage/graph.h"
@@ -118,6 +120,114 @@ void Graph::AddEdgeVersioned(uint v1, uint v2, uint label, uint timestamp)
     elabel_count_ = std::max(elabel_count_, label + 1);
 }
 
+// Parallel batch insertion of versioned edges.
+// Strategy: bucket inserts per source vertex (sequential scatter, O(E)),
+// then per-vertex sorted merge in parallel (independent buckets).
+// Note: hash_adj_ is NOT maintained (matches AddEdgeVersioned behavior).
+size_t Graph::AddEdgesVersionedBatch(const std::vector<VersionedEdgeBatch>& edges,
+                                     size_t num_threads)
+{
+    if (edges.empty()) return 0;
+    const size_t N = neighbors_.size();
+    const bool has_ts = !edge_timestamps_.empty();
+
+    // ---- Phase 1: per-vertex insertion counts ----
+    std::vector<size_t> off(N + 1, 0);
+    for (const auto& e : edges) {
+        off[e.v1 + 1]++;
+        off[e.v2 + 1]++;
+    }
+    for (size_t v = 0; v < N; v++) off[v + 1] += off[v];
+
+    // ---- Phase 2: scatter into flat per-vertex bucket ----
+    struct Ins { uint nbr, label, ts; };
+    std::vector<Ins> flat(off[N]);
+    std::vector<size_t> cur = off;  // cursors
+    for (const auto& e : edges) {
+        flat[cur[e.v1]++] = Ins{e.v2, e.label, e.timestamp};
+        flat[cur[e.v2]++] = Ins{e.v1, e.label, e.timestamp};
+    }
+
+    // ---- Phase 3: per-vertex parallel sorted merge ----
+    std::atomic<size_t> total_added_endpoints{0};
+    uint emax = elabel_count_;
+
+    #pragma omp parallel for schedule(dynamic, 64) num_threads(num_threads) reduction(max:emax)
+    for (size_t v = 0; v < N; v++) {
+        size_t k = off[v + 1] - off[v];
+        if (k == 0) continue;
+
+        Ins* ins = flat.data() + off[v];
+        std::sort(ins, ins + k, [](const Ins& a, const Ins& b) { return a.nbr < b.nbr; });
+
+        // Drop duplicates within `ins` itself (keep earliest timestamp).
+        size_t k_uniq = 0;
+        for (size_t a = 0; a < k; a++) {
+            if (a > 0 && ins[a].nbr == ins[a - 1].nbr) continue;
+            ins[k_uniq++] = ins[a];
+        }
+        k = k_uniq;
+
+        auto& nbrs = neighbors_[v];
+        auto& elab = elabels_[v];
+        const size_t m = nbrs.size();
+
+        std::vector<uint> new_nbrs; new_nbrs.reserve(m + k);
+        std::vector<uint> new_elab; new_elab.reserve(m + k);
+        std::vector<uint> new_ts;   if (has_ts) new_ts.reserve(m + k);
+        const std::vector<uint>* old_ts = has_ts ? &edge_timestamps_[v] : nullptr;
+
+        size_t i = 0, j = 0, added_v = 0;
+        while (i < m && j < k) {
+            if (nbrs[i] < ins[j].nbr) {
+                new_nbrs.push_back(nbrs[i]);
+                new_elab.push_back(elab[i]);
+                if (has_ts) new_ts.push_back((*old_ts)[i]);
+                i++;
+            } else if (nbrs[i] > ins[j].nbr) {
+                new_nbrs.push_back(ins[j].nbr);
+                new_elab.push_back(ins[j].label);
+                if (has_ts) new_ts.push_back(ins[j].ts);
+                if (ins[j].label + 1 > emax) emax = ins[j].label + 1;
+                added_v++;
+                j++;
+            } else {
+                // duplicate: keep existing
+                new_nbrs.push_back(nbrs[i]);
+                new_elab.push_back(elab[i]);
+                if (has_ts) new_ts.push_back((*old_ts)[i]);
+                i++; j++;
+            }
+        }
+        while (i < m) {
+            new_nbrs.push_back(nbrs[i]);
+            new_elab.push_back(elab[i]);
+            if (has_ts) new_ts.push_back((*old_ts)[i]);
+            i++;
+        }
+        while (j < k) {
+            new_nbrs.push_back(ins[j].nbr);
+            new_elab.push_back(ins[j].label);
+            if (has_ts) new_ts.push_back(ins[j].ts);
+            if (ins[j].label + 1 > emax) emax = ins[j].label + 1;
+            added_v++;
+            j++;
+        }
+
+        nbrs = std::move(new_nbrs);
+        elab = std::move(new_elab);
+        if (has_ts) edge_timestamps_[v] = std::move(new_ts);
+
+        total_added_endpoints.fetch_add(added_v, std::memory_order_relaxed);
+    }
+
+    // Each undirected edge contributes to 2 endpoints.
+    size_t n_added = total_added_endpoints.load() / 2;
+    edge_count_ += static_cast<uint>(n_added);
+    elabel_count_ = emax;
+    return n_added;
+}
+
 void Graph::InitTimestamps()
 {
     edge_timestamps_.resize(neighbors_.size());
@@ -135,6 +245,20 @@ void Graph::ClearTimestamps()
 const std::vector<uint>& Graph::GetEdgeTimestamps(uint v) const
 {
     return edge_timestamps_[v];
+}
+
+uint Graph::GetEdgeTimestamp(uint v1, uint v2) const
+{
+    if (edge_timestamps_.empty()) return 0;
+    // Use the smaller-degree side for binary search
+    uint src = (GetDegree(v1) < GetDegree(v2)) ? v1 : v2;
+    uint tgt = (src == v1) ? v2 : v1;
+    auto it = std::lower_bound(neighbors_[src].begin(), neighbors_[src].end(), tgt);
+    if (it != neighbors_[src].end() && *it == tgt) {
+        size_t idx = std::distance(neighbors_[src].begin(), it);
+        return edge_timestamps_[src][idx];
+    }
+    return 0;
 }
 
 void Graph::RemoveEdge(uint v1, uint v2)
