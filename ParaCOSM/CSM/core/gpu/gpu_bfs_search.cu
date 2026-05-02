@@ -199,7 +199,7 @@ __global__ void bfs_expand_kernel(
 
         // 4. Write new partial match
         uint32_t slot = atomicAdd(out_count, 1);
-        if (slot >= max_out) return;  // buffer full — stop this thread
+        if (slot >= max_out) continue;  // buffer full — skip write but keep counting
 
         uint32_t* out = out_buf + slot * stride;
         out[0] = order_idx;
@@ -348,7 +348,7 @@ __global__ void bfs_init_versioned_kernel(
     if (elabel != found_el) return;
 
     uint32_t slot = atomicAdd(out_count, 1);
-    if (slot >= max_out) return;
+    if (slot >= max_out) return;  // count but skip write
 
     uint32_t stride = Q + 2;
     uint32_t* out = out_buf + slot * stride;
@@ -446,7 +446,7 @@ __global__ void bfs_expand_versioned_kernel(
 
         // Write new partial match
         uint32_t slot = atomicAdd(out_count, 1);
-        if (slot >= max_out) return;
+        if (slot >= max_out) continue;  // buffer full — skip write but keep counting
 
         uint32_t* out = out_buf + slot * stride;
         out[0] = order_idx;
@@ -811,10 +811,127 @@ void GPUBFSSearch::EnsureBufCapacity(uint32_t q) {
     size_t buf_bytes = MAX_BUF_MATCHES * stride * sizeof(uint32_t);
     CUDA_CHECK(cudaMalloc(&d_buf_a_, buf_bytes));
     CUDA_CHECK(cudaMalloc(&d_buf_b_, buf_bytes));
+    CUDA_CHECK(cudaMalloc(&d_buf_c_, buf_bytes));  // third buffer for overflow flush
     CUDA_CHECK(cudaMalloc(&d_count_, sizeof(uint32_t)));
     CUDA_CHECK(cudaMalloc(&d_result_, sizeof(uint64_t)));
-    printf("[BFS] Buffers allocated: 2 x %zuMB (max %zuM partial matches)\n",
+    printf("[BFS] Buffers allocated: 3 x %zuMB (max %zuM partial matches)\n",
            buf_bytes / (1024*1024), MAX_BUF_MATCHES / 1000000);
+}
+
+// ---------------------------------------------------------------------------
+// BFSFromDepth: process partial matches from start_depth through Q-1,
+// handling overflow by flushing accumulated results through remaining
+// levels before continuing. Results are accumulated into d_result_.
+// ---------------------------------------------------------------------------
+void GPUBFSSearch::BFSFromDepth(uint32_t* in_buf, uint32_t in_count,
+                                 uint32_t* scratch_buf, uint32_t start_depth,
+                                 uint32_t Q, uint32_t stride, bool versioned)
+{
+    if (in_count == 0) return;
+
+    int block = 256;
+    int grid;
+    uint32_t zero32 = 0;
+
+    uint32_t* cur_buf = in_buf;
+    uint32_t* next_buf = scratch_buf;
+    uint32_t cur_count = in_count;
+
+    for (uint32_t depth = start_depth; depth < Q; depth++) {
+        bool is_last = (depth == Q - 1);
+
+        if (is_last) {
+            grid = (cur_count + block - 1) / block;
+            if (versioned) {
+                bfs_count_versioned_kernel<<<grid, block>>>(
+                    d_csr_offsets_, d_csr_neighbors_, d_csr_elabels_, d_csr_timestamps_,
+                    d_vlabels_, d_all_orders_, cur_buf, cur_count, d_result_, depth, Q
+                );
+            } else {
+                bfs_count_kernel<<<grid, block>>>(
+                    d_csr_offsets_, d_csr_neighbors_, d_csr_elabels_, d_vlabels_,
+                    d_degrees_, d_all_orders_, cur_buf, cur_count, d_result_, depth, Q
+                );
+            }
+            CUDA_CHECK(cudaGetLastError());
+        } else {
+            uint32_t in_processed = 0;
+            uint32_t total_out = 0;
+
+            while (in_processed < cur_count) {
+                uint32_t chunk = cur_count - in_processed;
+                uint32_t max_chunk = static_cast<uint32_t>(MAX_BUF_MATCHES / 2);
+                if (chunk > max_chunk) chunk = max_chunk;
+
+                bool overflow;
+                uint32_t out_count;
+                do {
+                    CUDA_CHECK(cudaMemcpy(d_count_, &zero32, sizeof(uint32_t), cudaMemcpyHostToDevice));
+                    grid = (chunk + block - 1) / block;
+                    if (versioned) {
+                        bfs_expand_versioned_kernel<<<grid, block>>>(
+                            d_csr_offsets_, d_csr_neighbors_, d_csr_elabels_, d_csr_timestamps_,
+                            d_vlabels_, d_all_orders_,
+                            cur_buf + in_processed * stride, chunk,
+                            next_buf + total_out * stride, d_count_,
+                            depth, Q, static_cast<uint32_t>(MAX_BUF_MATCHES - total_out)
+                        );
+                    } else {
+                        bfs_expand_kernel<<<grid, block>>>(
+                            d_csr_offsets_, d_csr_neighbors_, d_csr_elabels_, d_vlabels_,
+                            d_degrees_, d_all_orders_,
+                            cur_buf + in_processed * stride, chunk,
+                            next_buf + total_out * stride, d_count_,
+                            depth, Q, static_cast<uint32_t>(MAX_BUF_MATCHES - total_out)
+                        );
+                    }
+                    CUDA_CHECK(cudaGetLastError());
+                    CUDA_CHECK(cudaDeviceSynchronize());
+
+                    CUDA_CHECK(cudaMemcpy(&out_count, d_count_, sizeof(uint32_t), cudaMemcpyDeviceToHost));
+                    overflow = (total_out + out_count > MAX_BUF_MATCHES);
+                    if (overflow && chunk > 1) {
+                        chunk = chunk / 2;
+                    } else {
+                        break;
+                    }
+                } while (true);
+
+                if (overflow) {
+                    if (chunk == 1 && total_out == 0) {
+                        // Single partial match overflows — count it directly through remaining levels
+                        // by recursing with the clamped output and skipping this input item
+                        out_count = std::min(out_count, static_cast<uint32_t>(MAX_BUF_MATCHES));
+                        if (out_count > 0) {
+                            printf("[BFS%s] Single-item overflow at depth %u→%u (%u outputs), flush\n",
+                                   versioned ? "-V" : "", depth, depth+1, out_count);
+                            BFSFromDepth(next_buf, out_count, d_buf_c_, depth + 1, Q, stride, versioned);
+                        }
+                        total_out = 0;
+                    } else {
+                        // Multi-item overflow — flush what we have and continue
+                        out_count = MAX_BUF_MATCHES - total_out;
+                        total_out += out_count;
+                        printf("[BFS%s] Flush %u partials at depth %u→%u (overflow, chunk=%u)\n",
+                               versioned ? "-V" : "", total_out, depth, depth+1, chunk);
+                        BFSFromDepth(next_buf, total_out, d_buf_c_, depth + 1, Q, stride, versioned);
+                        total_out = 0;
+                    }
+                } else {
+                    total_out += out_count;
+                }
+                in_processed += chunk;
+            }
+
+            printf("[BFS%s] Depth %u→%u: %u → %u partial matches\n",
+                   versioned ? "-V" : "", depth, depth+1, cur_count, total_out);
+
+            if (total_out == 0) break;
+            std::swap(cur_buf, next_buf);
+            cur_count = total_out;
+        }
+    }
+    CUDA_CHECK(cudaDeviceSynchronize());
 }
 
 uint64_t GPUBFSSearch::SearchBatchEdgesBFS(
@@ -871,80 +988,8 @@ uint64_t GPUBFSSearch::SearchBatchEdgesBFS(
 
     if (cur_count == 0) return 0;
 
-    // ---- Phase 2: BFS level-by-level with chunked overflow handling ----
-    // Strategy: when expand produces more output than buffer fits,
-    // process the input in chunks (each chunk = MAX_BUF_MATCHES / expansion_factor)
-    uint32_t* cur_buf = d_buf_a_;
-    uint32_t* next_buf = d_buf_b_;
-
-    for (uint32_t depth = 2; depth < Q; depth++) {
-        bool is_last = (depth == Q - 1);
-
-        if (is_last) {
-            grid = (cur_count + block - 1) / block;
-            bfs_count_kernel<<<grid, block>>>(
-                d_csr_offsets_, d_csr_neighbors_, d_csr_elabels_, d_vlabels_,
-                d_degrees_, d_all_orders_, cur_buf, cur_count, d_result_, depth, Q
-            );
-            CUDA_CHECK(cudaGetLastError());
-        } else {
-            // Try expand; if overflow, split into chunks
-            uint32_t in_processed = 0;
-            uint32_t total_out = 0;
-
-            while (in_processed < cur_count) {
-                // Determine chunk size: start with remaining, reduce if overflow
-                uint32_t chunk = cur_count - in_processed;
-                // Limit chunk to leave room for expansion (heuristic: max MAX/2 input per chunk)
-                uint32_t max_chunk = static_cast<uint32_t>(MAX_BUF_MATCHES / 2);
-                if (chunk > max_chunk) chunk = max_chunk;
-
-                bool overflow;
-                uint32_t out_count;
-                do {
-                    CUDA_CHECK(cudaMemcpy(d_count_, &zero32, sizeof(uint32_t), cudaMemcpyHostToDevice));
-
-                    grid = (chunk + block - 1) / block;
-                    bfs_expand_kernel<<<grid, block>>>(
-                        d_csr_offsets_, d_csr_neighbors_, d_csr_elabels_, d_vlabels_,
-                        d_degrees_, d_all_orders_,
-                        cur_buf + in_processed * stride, chunk,
-                        next_buf + total_out * stride, d_count_,
-                        depth, Q,
-                        static_cast<uint32_t>(MAX_BUF_MATCHES - total_out)
-                    );
-                    CUDA_CHECK(cudaGetLastError());
-                    CUDA_CHECK(cudaDeviceSynchronize());
-
-                    CUDA_CHECK(cudaMemcpy(&out_count, d_count_, sizeof(uint32_t), cudaMemcpyDeviceToHost));
-                    overflow = (total_out + out_count > MAX_BUF_MATCHES);
-
-                    if (overflow && chunk > 1024) {
-                        // Reduce chunk size and retry
-                        chunk = chunk / 2;
-                    } else {
-                        break;
-                    }
-                } while (true);
-
-                if (overflow) {
-                    out_count = MAX_BUF_MATCHES - total_out;
-                    printf("[BFS] WARNING: overflow at depth %u, chunk clamped (chunk=%u)\n", depth, chunk);
-                }
-
-                total_out += out_count;
-                in_processed += chunk;
-            }
-
-            printf("[BFS] Depth %u→%u: %u → %u partial matches\n",
-                   depth, depth+1, cur_count, total_out);
-
-            if (total_out == 0) break;
-
-            std::swap(cur_buf, next_buf);
-            cur_count = total_out;
-        }
-    }
+    // ---- Phase 2: BFS level-by-level with overflow handling ----
+    BFSFromDepth(d_buf_a_, cur_count, d_buf_b_, 2, Q, stride, false);
 
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -982,6 +1027,7 @@ uint64_t GPUBFSSearch::SearchBatchEdgesBFS_Versioned(
     if (!d_buf_a_) {
         CUDA_CHECK(cudaMalloc(&d_buf_a_, buf_bytes));
         CUDA_CHECK(cudaMalloc(&d_buf_b_, buf_bytes));
+        CUDA_CHECK(cudaMalloc(&d_buf_c_, buf_bytes));
         CUDA_CHECK(cudaMalloc(&d_count_, sizeof(uint32_t)));
         CUDA_CHECK(cudaMalloc(&d_result_, sizeof(uint64_t)));
     }
@@ -1028,68 +1074,7 @@ uint64_t GPUBFSSearch::SearchBatchEdgesBFS_Versioned(
     if (cur_count == 0) return 0;
 
     // ---- BFS levels ----
-    uint32_t* cur_buf = d_buf_a_;
-    uint32_t* next_buf = d_buf_b_;
-
-    for (uint32_t depth = 2; depth < Q; depth++) {
-        bool is_last = (depth == Q - 1);
-
-        if (is_last) {
-            grid = (cur_count + block - 1) / block;
-            bfs_count_versioned_kernel<<<grid, block>>>(
-                d_csr_offsets_, d_csr_neighbors_, d_csr_elabels_, d_csr_timestamps_,
-                d_vlabels_, d_all_orders_, cur_buf, cur_count, d_result_, depth, Q
-            );
-            CUDA_CHECK(cudaGetLastError());
-        } else {
-            uint32_t in_processed = 0;
-            uint32_t total_out = 0;
-
-            while (in_processed < cur_count) {
-                uint32_t chunk = cur_count - in_processed;
-                uint32_t max_chunk = static_cast<uint32_t>(MAX_BUF_MATCHES / 2);
-                if (chunk > max_chunk) chunk = max_chunk;
-
-                bool overflow;
-                uint32_t out_count;
-                do {
-                    CUDA_CHECK(cudaMemcpy(d_count_, &zero32, sizeof(uint32_t), cudaMemcpyHostToDevice));
-                    grid = (chunk + block - 1) / block;
-                    bfs_expand_versioned_kernel<<<grid, block>>>(
-                        d_csr_offsets_, d_csr_neighbors_, d_csr_elabels_, d_csr_timestamps_,
-                        d_vlabels_, d_all_orders_,
-                        cur_buf + in_processed * stride, chunk,
-                        next_buf + total_out * stride, d_count_,
-                        depth, Q,
-                        static_cast<uint32_t>(MAX_BUF_MATCHES - total_out)
-                    );
-                    CUDA_CHECK(cudaGetLastError());
-                    CUDA_CHECK(cudaDeviceSynchronize());
-
-                    CUDA_CHECK(cudaMemcpy(&out_count, d_count_, sizeof(uint32_t), cudaMemcpyDeviceToHost));
-                    overflow = (total_out + out_count > MAX_BUF_MATCHES);
-                    if (overflow && chunk > 1024) {
-                        chunk = chunk / 2;
-                    } else {
-                        break;
-                    }
-                } while (true);
-
-                if (overflow) {
-                    out_count = MAX_BUF_MATCHES - total_out;
-                    printf("[BFS-V] WARNING: overflow at depth %u\n", depth);
-                }
-                total_out += out_count;
-                in_processed += chunk;
-            }
-
-            printf("[BFS-V] Depth %u→%u: %u → %u partial matches\n",
-                   depth, depth+1, cur_count, total_out);
-            if (total_out == 0) break;
-            std::swap(cur_buf, next_buf);
-            cur_count = total_out;
-        }
-    }
+    BFSFromDepth(d_buf_a_, cur_count, d_buf_b_, 2, Q, stride, true);
 
     CUDA_CHECK(cudaDeviceSynchronize());
     uint64_t total_count;

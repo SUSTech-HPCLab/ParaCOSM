@@ -97,6 +97,7 @@ private:
     // Each partial match: [order_idx, m[0], ..., m[Q-1]] = (Q+1) uint32
     uint32_t* d_buf_a_ = nullptr;
     uint32_t* d_buf_b_ = nullptr;
+    uint32_t* d_buf_c_ = nullptr;  // third buffer for recursive overflow flush
     static constexpr size_t MAX_BUF_MATCHES = 400'000'000;
 
     // Counters
@@ -112,6 +113,11 @@ private:
 
     void EnsureEdgesCapacity(size_t n);
     void EnsureBufCapacity(uint32_t q);
+
+    // Recursive BFS from a given depth with overflow handling
+    void BFSFromDepth(uint32_t* in_buf, uint32_t in_count,
+                      uint32_t* scratch_buf, uint32_t start_depth,
+                      uint32_t Q, uint32_t stride, bool versioned);
 };
 
 #endif
