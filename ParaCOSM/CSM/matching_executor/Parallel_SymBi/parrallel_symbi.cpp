@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <atomic>
 #include <iostream>
 #include <queue>
 #include <unordered_set>
@@ -129,6 +130,19 @@ Parrllel_SymBi::Parrllel_SymBi(Graph& query_graph, Graph& data_graph,
         }
     }
 
+    // Initialize versioned matching order structures
+    const size_t num_edge_slots = (query_.NumEdges() + 1) * 2;
+    order_vs_.resize(num_edge_slots);
+    backward_vs_.resize(num_edge_slots);
+    join_check_vs_.resize(num_edge_slots);
+    join_check_labels_.resize(num_edge_slots);
+    for (size_t i = 0; i < num_edge_slots; i++) {
+        order_vs_[i].resize(query_.NumVertices());
+        backward_vs_[i].resize(query_.NumVertices());
+        join_check_vs_[i].resize(query_.NumVertices());
+        join_check_labels_[i].resize(query_.NumVertices());
+    }
+
 #ifdef DEBUG
     lstart2 = My_Get_Time();
 #endif
@@ -212,6 +226,11 @@ void Parrllel_SymBi::Preprocessing()
     end_time = omp_get_wtime();  // end
     std::cout << "Time taken to build DCS: " << end_time - start_time << " seconds." << std::endl; 
 
+    // Generate matching orders for versioned mode
+    start_time = omp_get_wtime();
+    GenerateMatchingOrder();
+    end_time = omp_get_wtime();
+    std::cout << "Time taken to generate matching orders: " << end_time - start_time << " seconds." << std::endl;
 }
 
 
@@ -320,6 +339,9 @@ void Parrllel_SymBi::BuildDAG()
     std::vector<bool> exist_on_tree(query_.NumVertices(), false);
     std::queue<uint> bfs_queue;
 
+    tree_parent_.resize(query_.NumVertices());
+    tree_parent_[q_root_] = q_root_;
+
     bfs_queue.push(q_root_);
     exist_on_tree[q_root_] = true;
     uint order_pos = 0u;
@@ -344,6 +366,7 @@ void Parrllel_SymBi::BuildDAG()
                 bfs_queue.push(u_other);
                 exist_on_tree[u_other] = true;
                 serialized_tree_[order_pos++] = u_other;
+                tree_parent_[u_other] = u;  // u is the tree parent of u_other
             }
             if (!visited[u_other])
             {
@@ -3721,6 +3744,44 @@ void Parrllel_SymBi::PrepareBatchEnumeration(size_t num_threads)
         local_vec_m.resize(num_threads, std::vector<uint>(nq, UNMATCHED));
     if (local_vec_extendable.size() < num_threads)
         local_vec_extendable.resize(num_threads, std::vector<ExtendableVertex>(nq));
+
+    // Slot pool for hot-edge fan-out (size = 8 * num_threads)
+    size_t desired_pool = std::max<size_t>(num_threads * 8, 16);
+    if (slot_pool_size_ < desired_pool) {
+        size_t old = slot_pool_size_;
+        slot_m_.resize(desired_pool, std::vector<uint>(nq, UNMATCHED));
+        slot_visited_.resize(desired_pool, std::vector<bool>(nv, false));
+        for (size_t s = old; s < desired_pool; s++) {
+            free_slots_.push(s);
+        }
+        slot_pool_size_ = desired_pool;
+    }
+    for (size_t s = 0; s < slot_pool_size_; s++) {
+        if (slot_visited_[s].size() < nv) slot_visited_[s].resize(nv, false);
+        if (slot_m_[s].size() < nq) slot_m_[s].assign(nq, UNMATCHED);
+    }
+
+    // Read tunables from environment
+    if (const char* env = std::getenv("PARACOSM_HOT_SPLIT_THRESHOLD")) {
+        size_t v = std::strtoul(env, nullptr, 10);
+        if (v > 0) hot_split_threshold_ = v;
+    }
+    if (const char* env = std::getenv("PARACOSM_HOT_CHUNK_SIZE")) {
+        size_t v = std::strtoul(env, nullptr, 10);
+        if (v > 0) hot_chunk_size_ = v;
+    }
+    if (const char* env = std::getenv("PARACOSM_DEEP_FORK_THRESHOLD")) {
+        size_t v = std::strtoul(env, nullptr, 10);
+        if (v > 0) deep_fork_threshold_ = v;
+    }
+    if (const char* env = std::getenv("PARACOSM_MAX_FORK_DEPTH")) {
+        size_t v = std::strtoul(env, nullptr, 10);
+        if (v > 0) max_fork_depth_ = static_cast<uint>(v);
+    }
+    if (const char* env = std::getenv("PARACOSM_DEEP_FORK_CHUNK")) {
+        size_t v = std::strtoul(env, nullptr, 10);
+        if (v > 0) deep_fork_chunk_ = v;
+    }
 }
 
 size_t Parrllel_SymBi::EnumerateNewEdge(uint v1, uint v2, uint label, size_t thread_id)
@@ -3782,6 +3843,438 @@ size_t Parrllel_SymBi::EnumerateNewEdge(uint v1, uint v2, uint label, size_t thr
     }
     DONE:
     return num_results;
+}
+
+// ---------------------------------------------------------------------------
+// Versioned search support
+// ---------------------------------------------------------------------------
+
+void Parrllel_SymBi::GenerateMatchingOrder()
+{
+    // Use serialized_tree_ (BFS order) as the global initial_order.
+    const auto& initial_order = serialized_tree_;
+    uint first_root_child = treeNode_[q_root_].forwards_.empty()
+        ? 0u : treeNode_[q_root_].forwards_.front();
+
+    // Generate matching orders for EVERY directed query edge.
+    // For each directed edge (u → u_other), we create an order starting with
+    // [u, u_other], walking upward from u_other toward root via tree parents,
+    // then filling remaining vertices in BFS order.
+    for (uint u = 0u; u < query_.NumVertices(); u++)
+    {
+        auto& q_nbrs = query_.GetNeighbors(u);
+
+        for (uint i = 0; i < q_nbrs.size(); i++)
+        {
+            uint u_other = q_nbrs[i];
+            const uint eidx = eidx_[u][u_other];
+
+            std::vector<bool> temp_visited(query_.NumVertices(), false);
+            auto& order = order_vs_[eidx];
+            auto& backwards = backward_vs_[eidx];
+            uint order_pos = 0;
+
+            temp_visited[u] = true;
+            temp_visited[u_other] = true;
+            order[order_pos++] = u;
+            order[order_pos++] = u_other;
+
+            // Walk upward from u_other toward root via tree parents
+            uint cur = u_other;
+            while (cur != q_root_)
+            {
+                uint parent = tree_parent_[cur];
+                if (temp_visited[parent]) {
+                    cur = parent;
+                    continue;
+                }
+                temp_visited[parent] = true;
+                order[order_pos] = parent;
+                backwards[order_pos] = cur;
+
+                // Compute join checks for this vertex
+                auto& pn = query_.GetNeighbors(parent);
+                auto& pl = query_.GetNeighborLabels(parent);
+                for (uint k = 0; k < pn.size(); k++) {
+                    if (temp_visited[pn[k]] && pn[k] != cur) {
+                        join_check_vs_[eidx][parent].push_back(pn[k]);
+                        join_check_labels_[eidx][parent].push_back(pl[k]);
+                    }
+                }
+
+                order_pos++;
+                cur = parent;
+            }
+
+            // Fill remaining vertices in BFS order
+            for (uint j = 0; j < query_.NumVertices(); j++)
+            {
+                uint local_u = initial_order[j];
+                if (!temp_visited[local_u])
+                {
+                    order[order_pos] = local_u;
+                    // Use tree parent as backward neighbor
+                    backwards[order_pos] = tree_parent_[local_u];
+
+                    // Compute join checks: all edges to already-visited vertices
+                    // except the backward neighbor
+                    auto& q_nbrs_local = query_.GetNeighbors(local_u);
+                    auto& q_nbr_labels_local = query_.GetNeighborLabels(local_u);
+
+                    for (uint k = 0; k < q_nbrs_local.size(); k++)
+                    {
+                        const uint local_u_other = q_nbrs_local[k];
+                        const uint local_u_other_label = q_nbr_labels_local[k];
+                        if (temp_visited[local_u_other] &&
+                            local_u_other != tree_parent_[local_u])
+                        {
+                            join_check_vs_[eidx][local_u].push_back(local_u_other);
+                            join_check_labels_[eidx][local_u].push_back(local_u_other_label);
+                        }
+                    }
+
+                    order_pos++;
+                    temp_visited[local_u] = true;
+                }
+            }
+        }
+    }
+
+    // Also generate order for ARTI -> q_root (single-vertex start)
+    if (!treeNode_[q_root_].forwards_.empty())
+    {
+        std::vector<bool> temp_visited(query_.NumVertices(), false);
+        const uint arti_eidx = eidx_[q_root_][first_root_child];
+        auto& order = order_vs_[arti_eidx];
+        auto& backwards = backward_vs_[arti_eidx];
+        uint order_pos = 0;
+
+        temp_visited[q_root_] = true;
+        order[order_pos++] = q_root_;
+
+        for (uint j = 0; j < query_.NumVertices(); j++)
+        {
+            uint local_u = initial_order[j];
+            if (!temp_visited[local_u])
+            {
+                order[order_pos] = local_u;
+                backwards[order_pos] = tree_parent_[local_u];
+
+                auto& q_nbrs_local = query_.GetNeighbors(local_u);
+                auto& q_nbr_labels_local = query_.GetNeighborLabels(local_u);
+
+                for (uint k = 0; k < q_nbrs_local.size(); k++)
+                {
+                    const uint local_u_other = q_nbrs_local[k];
+                    const uint local_u_other_label = q_nbr_labels_local[k];
+                    if (temp_visited[local_u_other] &&
+                        local_u_other != tree_parent_[local_u])
+                    {
+                        join_check_vs_[arti_eidx][local_u].push_back(local_u_other);
+                        join_check_labels_[arti_eidx][local_u].push_back(local_u_other_label);
+                    }
+                }
+
+                order_pos++;
+                temp_visited[local_u] = true;
+            }
+        }
+    }
+
+    // Build gpu_orders_ for GetMatchingOrders
+    gpu_orders_.clear();
+    for (uint u = 0u; u < query_.NumVertices(); u++) {
+        auto& q_nbrs = query_.GetNeighbors(u);
+        for (uint i = 0; i < q_nbrs.size(); i++) {
+            uint u_other = q_nbrs[i];
+            if (u > u_other) continue;
+            gpu_orders_.push_back(order_vs_[eidx_[u][u_other]]);
+        }
+    }
+}
+
+size_t Parrllel_SymBi::AcquireSlot()
+{
+    size_t s;
+    while (!free_slots_.try_pop(s)) {
+        #pragma omp taskyield
+    }
+    return s;
+}
+
+void Parrllel_SymBi::ReleaseSlot(size_t s)
+{
+    free_slots_.push(s);
+}
+
+static inline bool SymBiVersionedJoinCheck(const Graph& data, uint u_b_data_v, uint v,
+                                            uint expected_elabel, uint max_ts)
+{
+    const auto& nbrs = data.GetNeighbors(u_b_data_v);
+    auto it = std::lower_bound(nbrs.begin(), nbrs.end(), v);
+    if (it == nbrs.end() || *it != v) return false;
+    size_t idx = static_cast<size_t>(it - nbrs.begin());
+    if (data.GetNeighborLabels(u_b_data_v)[idx] != expected_elabel) return false;
+    if (data.GetEdgeTimestamps(u_b_data_v)[idx] > max_ts) return false;
+    return true;
+}
+
+size_t Parrllel_SymBi::EnumerateNewEdgeVersioned(uint v1, uint v2, uint label,
+                                                   size_t /*thread_id*/, uint max_timestamp)
+{
+    if (max_num_results_ == 0) return 0;
+
+    size_t slot = AcquireSlot();
+    auto& m = slot_m_[slot];
+    auto& visited = slot_visited_[slot];
+
+    size_t num_results = 0;
+
+    for (uint u1 = 0; u1 < query_.NumVertices(); u1++)
+    if (data_.GetVertexLabel(v1) == query_.GetVertexLabel(u1))
+    {
+    for (uint u2 = 0; u2 < query_.NumVertices(); u2++)
+    if (data_.GetVertexLabel(v2) == query_.GetVertexLabel(u2))
+    {
+        if (std::get<2>(query_.GetEdgeLabel(u1, u2)) != label) continue;
+
+        bool reversed = false;
+        if (std::find(treeNode_[u1].backwards_.begin(), treeNode_[u1].backwards_.end(), u2)
+            != treeNode_[u1].backwards_.end())
+        {
+            std::swap(u1, u2);
+            std::swap(v1, v2);
+            reversed = true;
+        }
+
+        auto run_search = [&](uint order_index) {
+            uint u_min = backward_vs_[order_index][2];
+            uint vmin = m[u_min];
+            const auto& nbrs = data_.GetNeighbors(vmin);
+            const size_t n_nbrs = nbrs.size();
+
+            if (n_nbrs < hot_split_threshold_ || !omp_in_parallel()) {
+                FindMatches_versioned_v2(order_index, 2, m, visited, num_results, max_timestamp);
+                return;
+            }
+
+            // Hot fan-out
+            std::atomic<size_t> sub{0};
+            const uint cu1 = u1, cu2 = u2, cv1 = v1, cv2 = v2;
+            const size_t chunk = hot_chunk_size_;
+            #pragma omp taskgroup
+            {
+                for (size_t lo = 0; lo < n_nbrs; lo += chunk) {
+                    size_t hi = std::min(lo + chunk, n_nbrs);
+                    #pragma omp task firstprivate(lo, hi, order_index, cu1, cu2, cv1, cv2, max_timestamp) shared(sub)
+                    {
+                        if (!reach_time_limit && sub.load(std::memory_order_relaxed) < max_num_results_) {
+                            size_t s = AcquireSlot();
+                            auto& tm = slot_m_[s];
+                            auto& tv = slot_visited_[s];
+                            tm[cu1] = cv1; tm[cu2] = cv2;
+                            tv[cv1] = true; tv[cv2] = true;
+                            size_t r = 0;
+                            FindMatches_versioned_chunk(order_index, 2, tm, tv, r, max_timestamp, lo, hi);
+                            tm[cu1] = UNMATCHED; tm[cu2] = UNMATCHED;
+                            tv[cv1] = false; tv[cv2] = false;
+                            sub.fetch_add(r, std::memory_order_relaxed);
+                            ReleaseSlot(s);
+                        }
+                    }
+                }
+            }
+            num_results += sub.load();
+        };
+
+        // Case 1: tree edge (u1 parent of u2)
+        if (std::find(treeNode_[u2].backwards_.begin(), treeNode_[u2].backwards_.end(), u1)
+            != treeNode_[u2].backwards_.end())
+        {
+            m[u1] = v1; m[u2] = v2;
+            visited[v1] = true; visited[v2] = true;
+
+            run_search(eidx_[u2][u1]);
+
+            visited[v1] = false; visited[v2] = false;
+            m[u1] = UNMATCHED; m[u2] = UNMATCHED;
+            if (num_results >= max_num_results_ || reach_time_limit) goto DONE_V;
+        }
+        // Case 2: non-tree edge
+        if (std::find(treeNode_[u1].backwards_.begin(), treeNode_[u1].backwards_.end(), u2)
+                == treeNode_[u1].backwards_.end()
+            && std::find(treeNode_[u2].backwards_.begin(), treeNode_[u2].backwards_.end(), u1)
+                == treeNode_[u2].backwards_.end())
+        {
+            m[u1] = v1; m[u2] = v2;
+            visited[v1] = true; visited[v2] = true;
+
+            run_search(eidx_[std::min(u1, u2)][std::max(u1, u2)]);
+
+            visited[v1] = false; visited[v2] = false;
+            m[u1] = UNMATCHED; m[u2] = UNMATCHED;
+            if (num_results >= max_num_results_ || reach_time_limit) goto DONE_V;
+        }
+        if (reversed) { std::swap(u1, u2); std::swap(v1, v2); }
+    }
+    }
+    DONE_V:
+    ReleaseSlot(slot);
+    return num_results;
+}
+
+void Parrllel_SymBi::FindMatches_versioned_v2(uint order_index, uint depth,
+    std::vector<uint>& m, std::vector<bool>& visited,
+    size_t& num_results, uint max_ts)
+{
+    uint u = order_vs_[order_index][depth];
+    uint u_min = backward_vs_[order_index][depth];
+
+    auto q_elabel = std::get<2>(query_.GetEdgeLabel(u_min, u));
+    const uint q_vlabel_u = query_.GetVertexLabel(u);
+
+    const auto& nbrs = data_.GetNeighbors(m[u_min]);
+    const auto& nbr_labels = data_.GetNeighborLabels(m[u_min]);
+    const auto& nbr_ts = data_.GetEdgeTimestamps(m[u_min]);
+
+    const uint nv = query_.NumVertices();
+    const auto& jc_vs = join_check_vs_[order_index][u];
+    const auto& jc_labels = join_check_labels_[order_index][u];
+    const size_t jc_n = jc_vs.size();
+
+    // Deep-layer fork
+    const size_t n_nbrs_total = nbrs.size();
+    if (depth >= 3 && depth <= max_fork_depth_
+        && n_nbrs_total >= deep_fork_threshold_
+        && omp_in_parallel()
+        && !reach_time_limit
+        && num_results < max_num_results_)
+    {
+        std::array<uint, 32> prefix_q{}, prefix_v{};
+        for (uint d = 0; d < depth; d++) {
+            uint qu = order_vs_[order_index][d];
+            prefix_q[d] = qu;
+            prefix_v[d] = m[qu];
+        }
+        const uint cap_depth = depth;
+        const uint cap_order = order_index;
+        const size_t chunk = deep_fork_chunk_;
+
+        std::atomic<size_t> sub{0};
+        #pragma omp taskgroup
+        {
+            for (size_t lo = 0; lo < n_nbrs_total; lo += chunk) {
+                size_t hi = std::min(lo + chunk, n_nbrs_total);
+                #pragma omp task firstprivate(lo, hi, cap_depth, cap_order, max_ts, prefix_q, prefix_v) shared(sub)
+                {
+                    if (!reach_time_limit && sub.load(std::memory_order_relaxed) < max_num_results_) {
+                        size_t s = AcquireSlot();
+                        auto& tm = slot_m_[s];
+                        auto& tv = slot_visited_[s];
+                        for (uint d = 0; d < cap_depth; d++) {
+                            tm[prefix_q[d]] = prefix_v[d];
+                            tv[prefix_v[d]] = true;
+                        }
+                        size_t r = 0;
+                        FindMatches_versioned_chunk(cap_order, cap_depth, tm, tv, r, max_ts, lo, hi);
+                        for (uint d = 0; d < cap_depth; d++) {
+                            tm[prefix_q[d]] = UNMATCHED;
+                            tv[prefix_v[d]] = false;
+                        }
+                        sub.fetch_add(r, std::memory_order_relaxed);
+                        ReleaseSlot(s);
+                    }
+                }
+            }
+        }
+        num_results += sub.load();
+        return;
+    }
+
+    for (uint idx = 0; idx < nbrs.size(); idx++)
+    {
+        if (nbr_ts[idx] > max_ts) continue;
+        if (nbr_labels[idx] != q_elabel) continue;
+        uint v = nbrs[idx];
+        if (data_.GetVertexLabel(v) != q_vlabel_u) continue;
+
+        bool joinable = true;
+        for (size_t i = 0; i < jc_n; i++) {
+            if (!SymBiVersionedJoinCheck(data_, m[jc_vs[i]], v, jc_labels[i], max_ts)) {
+                joinable = false; break;
+            }
+        }
+        if (!joinable) continue;
+
+        if (!homomorphism_ && visited[v]) continue;
+
+        m[u] = v;
+        visited[v] = true;
+
+        if (depth == nv - 1) {
+            num_results++;
+        } else {
+            FindMatches_versioned_v2(order_index, depth + 1, m, visited, num_results, max_ts);
+        }
+
+        visited[v] = false;
+        m[u] = UNMATCHED;
+
+        if (num_results >= max_num_results_ || reach_time_limit) return;
+    }
+}
+
+void Parrllel_SymBi::FindMatches_versioned_chunk(uint order_index, uint depth,
+    std::vector<uint>& m, std::vector<bool>& visited,
+    size_t& num_results, uint max_ts, size_t lo, size_t hi)
+{
+    uint u = order_vs_[order_index][depth];
+    uint u_min = backward_vs_[order_index][depth];
+
+    auto q_elabel = std::get<2>(query_.GetEdgeLabel(u_min, u));
+    const uint q_vlabel_u = query_.GetVertexLabel(u);
+
+    const auto& nbrs = data_.GetNeighbors(m[u_min]);
+    const auto& nbr_labels = data_.GetNeighborLabels(m[u_min]);
+    const auto& nbr_ts = data_.GetEdgeTimestamps(m[u_min]);
+
+    const uint nv = query_.NumVertices();
+    const auto& jc_vs = join_check_vs_[order_index][u];
+    const auto& jc_labels = join_check_labels_[order_index][u];
+    const size_t jc_n = jc_vs.size();
+
+    size_t end = std::min<size_t>(hi, nbrs.size());
+    for (size_t idx = lo; idx < end; idx++)
+    {
+        if (nbr_ts[idx] > max_ts) continue;
+        if (nbr_labels[idx] != q_elabel) continue;
+        uint v = nbrs[idx];
+        if (data_.GetVertexLabel(v) != q_vlabel_u) continue;
+
+        bool joinable = true;
+        for (size_t i = 0; i < jc_n; i++) {
+            if (!SymBiVersionedJoinCheck(data_, m[jc_vs[i]], v, jc_labels[i], max_ts)) {
+                joinable = false; break;
+            }
+        }
+        if (!joinable) continue;
+
+        if (!homomorphism_ && visited[v]) continue;
+
+        m[u] = v;
+        visited[v] = true;
+
+        if (depth == nv - 1) {
+            num_results++;
+        } else {
+            FindMatches_versioned_v2(order_index, depth + 1, m, visited, num_results, max_ts);
+        }
+
+        visited[v] = false;
+        m[u] = UNMATCHED;
+
+        if (num_results >= max_num_results_ || reach_time_limit) return;
+    }
 }
 
 

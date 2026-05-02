@@ -23,6 +23,7 @@
 #include "matching_executor/Parallel_SymBi/parallel_symbi.h"
 #include "matching_executor/Parallel_TurboFlux/parallel_turboflux.h"
 #include "matching_executor/Parallel_GraphFlow/parallel_graphflow.h"
+#include "matching_executor/Parallel_CaLiG/parallel_calig_class.h"
 
 #include "core/inter_executor/inter_executor.h"
 
@@ -252,6 +253,7 @@ int main(int argc, char *argv[])
     Parrllel_SymBi *parrallel = nullptr;
     Parallel_TurboFlux *parallel_turboflux = nullptr;
     Parallel_Graphflow *parallel_graphflow = nullptr;
+    Parallel_CaLiG *parallel_calig = nullptr;
     
     start = My_Get_Time();
 
@@ -274,6 +276,8 @@ int main(int argc, char *argv[])
         mm = parallel_turboflux = new Parallel_TurboFlux(query_graph, data_graph, max_num_results, print_prep, print_enum, homo, thread_num, auto_tuning);
     else if (algorithm == "parallel_graphflow")
         mm = parallel_graphflow = new Parallel_Graphflow (query_graph, data_graph, max_num_results, print_prep, print_enum, homo, thread_num, auto_tuning);
+    else if (algorithm == "parallel_calig")
+        mm = parallel_calig = new Parallel_CaLiG(query_graph, data_graph, max_num_results, print_prep, print_enum, homo, thread_num, auto_tuning);
     else if (algorithm == "none")
         mm                  = new matching      (query_graph, data_graph, max_num_results, print_prep, print_enum, homo);
     else

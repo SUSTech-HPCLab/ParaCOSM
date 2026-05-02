@@ -85,6 +85,7 @@ set(PARALLEL_SYMBI ${MATCH}/Parallel_SymBi)
 set(PARALLEL_TURBOFLUX ${MATCH}/Parallel_TurboFlux)
 set(PARALLEL_GRAPHFLOW ${MATCH}/Parallel_GraphFlow)
 set(PARALLEL_NEWSP ${MATCH}/Parallel_NewSP)
+set(PARALLEL_CALIG ${MATCH}/Parallel_CaLiG)
 
 set(SRC_FILES
     ${MATCH}/main.cpp
@@ -99,6 +100,7 @@ set(SRC_FILES
     ${PARALLEL_SYMBI}/parrallel_symbi.cpp
     ${PARALLEL_TURBOFLUX}/parallel_turboflux.cpp
     ${PARALLEL_GRAPHFLOW}/parallel_graphflow.cpp
+    ${PARALLEL_CALIG}/parallel_calig_class.cpp
     # ${PARALLEL_NEWSP}/parallel_newsp.cpp
 
     ${GRAPH}/graph.cpp
