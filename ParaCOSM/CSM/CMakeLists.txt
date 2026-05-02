@@ -101,6 +101,7 @@ set(SRC_FILES
     ${PARALLEL_TURBOFLUX}/parallel_turboflux.cpp
     ${PARALLEL_GRAPHFLOW}/parallel_graphflow.cpp
     ${PARALLEL_CALIG}/parallel_calig_class.cpp
+    ${PARALLEL_NEWSP}/newsp_adapter.cpp
     # ${PARALLEL_NEWSP}/parallel_newsp.cpp
 
     ${GRAPH}/graph.cpp
