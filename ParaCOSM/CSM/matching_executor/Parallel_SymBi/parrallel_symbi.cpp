@@ -3095,66 +3095,36 @@ void Parrllel_SymBi::AddEdgeAsync(uint v1, uint v2, uint label)
 bool Parrllel_SymBi::Classify(uint v1, uint v2, uint label){
     auto v1_label = data_.GetVertexLabel(v1);
 
-    for (uint u1 = 0; u1 < query_.NumVertices(); u1++){ // take one u1 from query
-        //  Get v1 that label matched to query label
-        if (v1_label == query_.GetVertexLabel(u1)){
+    for (uint u1 = 0; u1 < query_.NumVertices(); u1++){
+        if (v1_label != query_.GetVertexLabel(u1)) continue;
 
-            // Get v2 that label matched to query vertex
-            for (uint u2 = 0; u2 < query_.NumVertices(); u2++){ // take one u2 from query
+        for (uint u2 = 0; u2 < query_.NumVertices(); u2++){
+            if (data_.GetVertexLabel(v2) != query_.GetVertexLabel(u2)) continue;
+            if (std::get<2>(query_.GetEdgeLabel(u1, u2)) != label) continue;
 
-                if (data_.GetVertexLabel(v2) == query_.GetVertexLabel(u2)){
-
-
-                    if (std::get<2>(query_.GetEdgeLabel(u1, u2)) != label) continue;
-
-                    // Prune 1: detect if the vertex degree is less than the query vertex degree
-                    // InterExecutor::DegreePruning(v1, v2, label);
-                    if (data_.GetDegree(v1) < query_.GetDegree(u1) && data_.GetDegree(v2) < query_.GetDegree(u2)){
-                        continue;
-                    }
-                    
-                    // Prune 1: detect if the edge is in the query graph
-                    // if (label == std::get<2>(query_.GetEdgeLabel(u1, u2))){return false;}                    
-                    
-                    bool reversed = false;
-
-                    if (std::find(treeNode_[u1].backwards_.begin(), treeNode_[u1].backwards_.end(), u2) != treeNode_[u1].backwards_.end())
-                    {
-                        std::swap(u1, u2); // 
-                        std::swap(v1, v2); //
-                        reversed = true;
-                    }
-                    if (std::find(treeNode_[u2].backwards_.begin(), treeNode_[u2].backwards_.end(), u1)
-                         != treeNode_[u2].backwards_.end())
-                    {
-                        // Prune 2: detect if the edge is in the DCS graph
-                        // for more complex query graph
-                        // detect if DCS has update. If so, that means new FM will occur
-                        return false;
-
-                        // Prune 3: detect if the edge is in the FM path
-                        // for more complex query graph
-                        // If so, that means new FM will occur
-                        bool old_p_d1 = d1[u1][v1], old_p_d2 = d2[u1][v1], old_c_d2 = d2[u2][v2];
-
-                        if(old_p_d1 || old_p_d2 || old_c_d2){
-                            return false;
-                        }
-
-
-                    }
-                    if (reversed)
-                    {
-                        std::swap(u1, u2);
-                        std::swap(v1, v2);
-                    }
-                }
+            bool reversed = false;
+            if (std::find(treeNode_[u1].backwards_.begin(), treeNode_[u1].backwards_.end(), u2)
+                != treeNode_[u1].backwards_.end())
+            {
+                std::swap(u1, u2);
+                std::swap(v1, v2);
+                reversed = true;
+            }
+            if (std::find(treeNode_[u2].backwards_.begin(), treeNode_[u2].backwards_.end(), u1)
+                 != treeNode_[u2].backwards_.end())
+            {
+                // Found a matching query edge — unsafe
+                if (reversed) { std::swap(u1, u2); std::swap(v1, v2); }
+                return false;
+            }
+            if (reversed) {
+                std::swap(u1, u2);
+                std::swap(v1, v2);
             }
         }
     }
 
-    return true;
-
+    return true;  // safe
 }
 
 
@@ -4037,6 +4007,11 @@ size_t Parrllel_SymBi::EnumerateNewEdgeVersioned(uint v1, uint v2, uint label,
     if (data_.GetVertexLabel(v2) == query_.GetVertexLabel(u2))
     {
         if (std::get<2>(query_.GetEdgeLabel(u1, u2)) != label) continue;
+
+        // Post-add degree pruning: all edges are already in data graph,
+        // so degree checks are safe and exact
+        if (data_.GetDegree(v1) < query_.GetDegree(u1) ||
+            data_.GetDegree(v2) < query_.GetDegree(u2)) continue;
 
         bool reversed = false;
         if (std::find(treeNode_[u1].backwards_.begin(), treeNode_[u1].backwards_.end(), u2)
