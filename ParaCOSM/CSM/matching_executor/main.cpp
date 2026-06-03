@@ -23,6 +23,8 @@
 #include "matching_executor/Parallel_SymBi/parallel_symbi.h"
 #include "matching_executor/Parallel_TurboFlux/parallel_turboflux.h"
 #include "matching_executor/Parallel_GraphFlow/parallel_graphflow.h"
+#include "matching_executor/Parallel_CaLiG/parallel_calig_class.h"
+#include "matching_executor/Parallel_NewSP/newsp_adapter.h"
 
 #include "core/inter_executor/inter_executor.h"
 
@@ -160,6 +162,26 @@ inline void RunUpdates_InterExecutor(Graph& data_graph, matching* mm, size_t& nu
         executor.BatchUpdates_GPU(
             num_v_updates, num_e_updates, unsafe_updates, count,
             positive_num_results_last, negative_num_results_last, reach_time_limit);
+    } else if (update_mode == "gpu_all") {
+        executor.BatchUpdates_GPU_AllAtOnce(
+            num_v_updates, num_e_updates, unsafe_updates, count,
+            positive_num_results_last, negative_num_results_last, reach_time_limit);
+    } else if (update_mode == "gpu_bfs") {
+        executor.BatchUpdates_GPU_BFS(
+            num_v_updates, num_e_updates, unsafe_updates, count,
+            positive_num_results_last, negative_num_results_last, reach_time_limit);
+    } else if (update_mode == "gpu_bfs_single") {
+        executor.BatchUpdates_GPU_BFS_Single(
+            num_v_updates, num_e_updates, unsafe_updates, count,
+            positive_num_results_last, negative_num_results_last, reach_time_limit);
+    } else if (update_mode == "versioned") {
+        executor.BatchUpdates_Versioned(
+            num_v_updates, num_e_updates, unsafe_updates, count,
+            positive_num_results_last, negative_num_results_last, reach_time_limit, num_threads);
+    } else if (update_mode == "gpu_bfs_versioned") {
+        executor.BatchUpdates_GPU_BFS_Versioned(
+            num_v_updates, num_e_updates, unsafe_updates, count,
+            positive_num_results_last, negative_num_results_last, reach_time_limit);
     } else {
         // default fallback
         executor.BatchUpdates3(
@@ -232,6 +254,7 @@ int main(int argc, char *argv[])
     Parrllel_SymBi *parrallel = nullptr;
     Parallel_TurboFlux *parallel_turboflux = nullptr;
     Parallel_Graphflow *parallel_graphflow = nullptr;
+    Parallel_CaLiG *parallel_calig = nullptr;
     
     start = My_Get_Time();
 
@@ -254,6 +277,10 @@ int main(int argc, char *argv[])
         mm = parallel_turboflux = new Parallel_TurboFlux(query_graph, data_graph, max_num_results, print_prep, print_enum, homo, thread_num, auto_tuning);
     else if (algorithm == "parallel_graphflow")
         mm = parallel_graphflow = new Parallel_Graphflow (query_graph, data_graph, max_num_results, print_prep, print_enum, homo, thread_num, auto_tuning);
+    else if (algorithm == "parallel_calig")
+        mm = parallel_calig = new Parallel_CaLiG(query_graph, data_graph, max_num_results, print_prep, print_enum, homo, thread_num, auto_tuning);
+    else if (algorithm == "parallel_newsp")
+        mm = new Parallel_NewSP_Adapter(query_graph, data_graph, max_num_results, print_prep, print_enum, homo, thread_num, auto_tuning);
     else if (algorithm == "none")
         mm                  = new matching      (query_graph, data_graph, max_num_results, print_prep, print_enum, homo);
     else
