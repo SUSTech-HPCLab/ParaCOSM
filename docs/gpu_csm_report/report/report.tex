@@ -1,13 +1,18 @@
 \documentclass[sigconf,nonacm]{acmart}
 
+\usepackage{lmodern}
 \usepackage{booktabs}
 \usepackage{amsmath}
+\usepackage{amsthm}
 \usepackage{graphicx}
 \usepackage{listings}
 \usepackage{xcolor}
 \usepackage{pifont}
 \newcommand{\cmark}{\textcolor{green!55!black}{\ding{51}}}
 \newcommand{\xmark}{\textcolor{red!70!black}{\ding{55}}}
+
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}
 
 \sloppy
 \emergencystretch=3em
@@ -21,6 +26,22 @@
   \country{China}
 }
 \email{12211612@mail.sustech.edu.cn}
+
+\author{Ziheng Wang}
+\affiliation{%
+  \institution{Southern University of Science and Technology}
+  \city{Shenzhen}
+  \country{China}
+}
+\email{12310401@mail.sustech.edu.cn}
+
+\author{Rongchuan Li}
+\affiliation{%
+  \institution{Southern University of Science and Technology}
+  \city{Shenzhen}
+  \country{China}
+}
+\email{12211402@mail.sustech.edu.cn}
 
 \begin{document}
 
@@ -51,22 +72,105 @@ This report describes a GPU port of ParaCOSM's search and classification stages.
 \section{Background and System}
 % ============================================================================
 
-\subsection{The CSM Workload}
-A CSM query $q$ has a fixed matching order $\pi$. For each incremental update $\Delta = (v_1, v_2, \ell)$, the executor first \emph{classifies} $\Delta$ as \emph{safe} (the new matches it produces are disjoint from those produced by other concurrent updates) or \emph{unsafe} (search cannot run in parallel with the other updates). Unsafe updates are then individually expanded by a depth-bounded search rooted at $(v_1, v_2)$.
+\subsection{Formal Definitions}
+\label{sec:defs}
 
-For the 8-vertex queries used here, the search proceeds through 6 expansion levels (\texttt{depth 1$\to$2} to \texttt{depth 6$\to$7}), each level enlarging the partial-match set by an algorithm-specific filtering rule.
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/csm_running_example.png}
+\caption{Running example of continuous subgraph matching, reproduced from ParaCOSM~\cite{paracosm2025} (Fig.~1).}
+\label{fig:csm-running}
+\end{figure}
 
-\subsection{System Overview}
-Four GPU modules implement the pipeline:
+We adopt the formalism of ParaCOSM~\cite{paracosm2025}. Throughout, $g=(V,E)$ denotes a labeled undirected graph with vertex- and edge-labeling functions $L_V\!:\!V\!\to\!\Sigma_V$ and $L_E\!:\!E\!\to\!\Sigma_E$ (jointly written $L$); $N(u)$ and $d(u)\!=\!|N(u)|$ are the neighbor set and degree of $u$. We write $G$ for the data graph and $Q$ for the query graph.
+
+\begin{definition}[Subgraph match]
+A \emph{match} of $Q$ in $G$ is an injection $M\!:\!V(Q)\!\to\!V(G)$ such that
+\begin{enumerate}
+\item[(i)]   $L(u)=L(M(u))$ for every $u\in V(Q)$;
+\item[(ii)]  $L(e(u,u'))=L(e(M(u),M(u')))$ for every $e(u,u')\in E(Q)$;
+\item[(iii)] $e(M(u),M(u'))\in E(G)$ for every $e(u,u')\in E(Q)$.
+\end{enumerate}
+We denote the set of all such matches by $\mathcal{M}$.
+\end{definition}
+
+\begin{definition}[Graph stream]
+The data graph evolves under a sequence
+$\Delta\mathcal{G}=(\Delta G_1,\Delta G_2,\dots)$ of single-element updates,
+each of the form $\Delta G=(\pm,\,e/v)$ — i.e., insertion or deletion of one
+edge or vertex. Applying $\Delta G$ to $G$ yields $G'$.
+\end{definition}
+
+\begin{definition}[CSM problem~\cite{paracosm2025}]
+Given $G$, $Q$, and $\Delta\mathcal{G}$, CSM reports, for every $\Delta G\in\Delta\mathcal{G}$, the \emph{incremental match set}
+$\Delta\mathcal{M} = \mathcal{M}'\!\setminus\!\mathcal{M}\;\cup\;\mathcal{M}\!\setminus\!\mathcal{M}'$,
+i.e., the matches that newly appear or expire as a result of $\Delta G$.
+\end{definition}
+
+\begin{definition}[Compatible set]
+For a partial mapping $\phi\!:\!V'_Q\!\to\!V'_G$ that satisfies the matching constraints on the matched-so-far vertices, the \emph{compatible set} of an unmatched query vertex $u\in V_Q\!\setminus\!V'_Q$ is
+$C(u,\phi)=\{v\in V_G\!\setminus\!V'_G \mid \phi\cup\{(u,v)\}\text{ remains valid}\}.$
+\end{definition}
+
+\subsection{The Two-Stage Model}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/csm_general_workflow.png}
+\caption{General two-stage workflow of CSM algorithms (offline + online), reproduced from ParaCOSM~\cite{paracosm2025} (Fig.~2).}
+\label{fig:csm-workflow}
+\end{figure}
+
+Following the survey of Sun~et~al.~\cite{calig} and the unified view of ParaCOSM, every CSM algorithm decomposes into (see Fig.~\ref{fig:csm-workflow}):
+
+\paragraph{Offline stage.} Build an auxiliary data structure $\mathcal{A}$ (DCS for SymBi, candidate-set index for CaLiG, DAG order for TurboFlux, none for GraphFlow, CPT/EXP order for NewSP), pick a matching order $\mathcal{O}$, and (optionally) compute initial matches $\mathcal{M}_0$.
+
+\paragraph{Online stage.} For each $\Delta G$:
+\begin{enumerate}
+  \item update the data graph and the auxiliary structure: $\mathcal{A}\!\leftarrow\!\textsc{Update}\_\textsc{ADS}(Q,\mathcal{A},\Delta G)$;
+  \item build the search tree $\mathcal{T}$ rooted at the inserted/deleted edge $e$ following $\mathcal{O}$;
+  \item enumerate $\Delta\mathcal{M}$ by traversing $\mathcal{T}$. The traversal expands a partial match $M$ by selecting the next query vertex $u$, computing $C(u,M)$, and recursing into each valid extension.
+\end{enumerate}
+
+\subsection{Safe vs. Unsafe Updates}
+\label{sec:safe}
+ParaCOSM observes that, on real workloads, more than $98.4\%$ of edge updates do \emph{not} change $\mathcal{M}$. It calls these \emph{safe}; the remainder are \emph{unsafe}. Concretely, an update is classified \texttt{unsafe} if any of the following triggers fires: (i) \emph{label} filter — its endpoint labels match some query edge; (ii) \emph{degree} filter — both endpoints reach the degree threshold of a query vertex; (iii) \emph{candidate} filter — it perturbs $\mathcal{A}$ in a way that may invalidate other concurrent matches.
+
+Safe updates can be batched and applied in parallel to $G$ alone; unsafe updates must each launch a search. The GPU work in this report targets the per-unsafe-update \emph{search}, which dominates wall time even after the safe-update fast path is taken.
+
+\subsection{What This Report Adds: A GPU Back-End}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/csm_paracosm_arch.png}
+\caption{ParaCOSM architecture (reproduced from~\cite{paracosm2025}, Fig.~5). Our GPU back-end replaces the inter-update and inner-update parallel executors with CUDA kernels while keeping the user-defined hooks (matching order, filtering, search-tree exploration) unchanged.}
+\label{fig:paracosm-arch}
+\end{figure}
+
+On top of ParaCOSM's CPU runtime (Fig.~\ref{fig:paracosm-arch}), we add four GPU modules; each one implements one of the boxes in the online loop above:
 
 \begin{itemize}
-    \item \texttt{gpu\_classifier} (mode \texttt{-m gpu}). Edge classification on the GPU.
-    \item \texttt{gpu\_candidate\_filter} (PFM2 auto-invoked). Candidate filtering between adjacent vertices in $q$.
-    \item \texttt{gpu\_search} (mode \texttt{-m gpu\_all}). DFS-style search; each thread holds a stack and unwinds independently.
-    \item \texttt{gpu\_bfs\_search} (modes \texttt{-m gpu\_bfs} and \texttt{-m gpu\_bfs\_versioned}). Level-synchronous BFS; the active partial-match set is materialized in device memory and reduced one query vertex at a time.
+    \item \texttt{gpu\_classifier} (mode \texttt{-m gpu}). Implements the safe/unsafe classifier of \S\ref{sec:safe} on the device, fusing label, degree, and candidate filters into one kernel.
+    \item \texttt{gpu\_candidate\_filter} (auto, PFM2). Computes $C(u,\phi)$ for adjacent query vertices in parallel.
+    \item \texttt{gpu\_search} (mode \texttt{-m gpu\_all}). DFS-style traversal of $\mathcal{T}$; one thread per root, with a per-thread stack.
+    \item \texttt{gpu\_bfs\_search} (modes \texttt{-m gpu\_bfs} and \texttt{-m gpu\_bfs\_versioned}). Level-synchronous BFS over $\mathcal{T}$; the active partial-match set is materialized in device memory and reduced one query vertex at a time. The \emph{versioned} variant tags every partial match with the originating update id so that one BFS frontier serves all unsafe updates in the current batch.
 \end{itemize}
 
-The five CSM algorithms appear as adapters that share these four GPU back-ends. The versioned protocol piggybacks per-update timestamps on the partial-match arrays so that the same BFS step services all unsafe updates in the current batch.
+The five CSM algorithms (\textsc{GraphFlow}, \textsc{TurboFlux}, \textsc{SymBi}, \textsc{CaLiG}, \textsc{NewSP}) appear as thin adapters that supply (a) their algorithm-specific compatibility test \texttt{Valid}$(u,v,M)$ and (b) their auxiliary-structure update rule, exactly the two hooks ParaCOSM already factors out on the CPU. For 8-vertex queries the BFS proceeds through 6 expansion levels, depth $1{\to}2$ through depth $6{\to}7$, before the final \texttt{Valid} check.
+
+\subsection{Versioned BFS Search Procedure}
+\label{sec:versioned}
+The \texttt{gpu\_bfs\_versioned} kernel consolidates the searches launched by \emph{all} unsafe updates in the current batch into a single level-synchronous BFS. Given a batch $B=\{\Delta G_i\}$ of unsafe updates that survived the classifier, the procedure is:
+
+\begin{enumerate}
+  \item \textbf{Frontier seeding.} For every $\Delta G_i=(\pm,\,e_i(v_1^{(i)},v_2^{(i)}))\in B$, push the root partial match $\{(\hat u_1,v_1^{(i)}),(\hat u_2,v_2^{(i)})\}$ into the depth-2 frontier, where $(\hat u_1,\hat u_2)$ is the query edge identified by the matching order $\mathcal{O}$.
+  \item \textbf{Versioning.} Each partial match carries a tag \texttt{ver\_id}$=i$ that records which update it originated from. The tag is propagated unchanged on every expansion.
+  \item \textbf{Lockstep expansion.} At depth $d{\to}d{+}1$, every CUDA thread reads one partial match, looks up the next query vertex $u_{d+1}$ given by $\mathcal{O}$, computes $C(u_{d+1},M)$ via the algorithm-specific \texttt{Valid} hook, and emits one extended partial match per candidate.
+  \item \textbf{Coalesced write-out.} Per-thread output sizes are summed by a block-wide prefix scan; the kernel then writes the new frontier into the device-resident partial-match buffer in one coalesced pass.
+  \item \textbf{Flush on overflow.} When the buffer is about to exceed its capacity ($4\times10^8$ entries in our build), the BFS pauses, drains the buffer to the result counter (grouped by \texttt{ver\_id}), and resumes from the saved frontier.
+\end{enumerate}
+
+\noindent\emph{Amortization.} Classification, edge insertion into the device CSR, and frontier seeding are paid \emph{once per batch} regardless of $|B|$, while the BFS arithmetic dominates only when the search is actually large. The empirical consequence is that batches of small unsafe updates ride essentially for free on top of the few large ones.
 
 % ============================================================================
 \section{Why BFS, not DFS}
@@ -214,6 +318,7 @@ The CPU \texttt{single} path therefore performs no actual matching for \textsc{N
 % ============================================================================
 \section{Improvement Directions}
 % ============================================================================
+\label{sec:improvements-short}
 We list improvements in order of expected return on engineering effort.
 
 \paragraph{Short-term.}
@@ -236,9 +341,41 @@ We list improvements in order of expected return on engineering effort.
 \end{itemize}
 
 % ============================================================================
+\section{Status and Reproducibility}
+% ============================================================================
+\label{sec:status}
+
+\paragraph{Current status (as of writing).}
+\begin{itemize}
+  \item AZ 8v: complete on all five algorithms (100 queries each, 4 of 5 finished within the 1800\,s per-pair budget for $>95\%$ of queries).
+  \item LJ 8v: 20 sampled queries; per-pair completion as reported in Table~\ref{tab:lj}. \textsc{SymBi} did not complete a single (CPU,\,GPU) pair within the time limit.
+  \item Cross-validation: GPU and CPU \textsc{GraphFlow}/\textsc{TurboFlux}/\textsc{SymBi}/\textsc{CaLiG} match counts agree to seven significant digits where both finished, confirming the BFS implementation is correct.
+  \item In-progress: a CPU \texttt{-m versioned} re-run for \textsc{NewSP} on LJ to replace the stub-affected CPU column in Table~\ref{tab:lj}.
+\end{itemize}
+
+\paragraph{Code and artifacts.}
+All code, scripts, and raw logs are in the public ParaCOSM repository (\texttt{SUSTech-HPCLab/ParaCOSM}, branch \texttt{report}). The relevant locations are:
+
+\begin{itemize}
+  \item \texttt{ParaCOSM/CSM/}: GPU back-end (\texttt{matching\_executor/}, \texttt{graph\_storage/}) and the five algorithm adapters.
+  \item \texttt{ParaCOSM/CSM/script\_bash/}: experiment drivers (one shell script per workload).
+  \item \texttt{analysis/}: parsed run logs and aggregated CSVs feeding the figures in this report.
+  \item \texttt{docs/gpu\_csm\_report/report/}: this paper, slides, and figure-generation notebooks; \texttt{make all} reproduces both PDFs.
+\end{itemize}
+
+\paragraph{Hardware.} Reproducing the exact wall-time numbers requires an A100-SXM4-80GB and a dual Xeon Platinum 8470 host; relative speedups should reproduce on any \texttt{sm\_80} or newer card with at least 40\,GB of device memory (the partial-match buffer alone consumes $\sim 32$\,GB).
+
+% ============================================================================
 \section{Conclusion}
 % ============================================================================
-We have shown that GPU acceleration of CSM is best framed as a level-synchronous BFS pipeline that consolidates the per-update search at fixed depth, rather than as a parallelized DFS. On the AZ 8-vertex workload, this design yields $20\times$ to $51\times$ median speedup over a tuned single-thread CPU baseline across all five state-of-the-art CSM algorithms. The same pipeline reveals a clean failure mode on heavily skewed graphs (LJ): the BFS frontier overflows a fixed-size device buffer and is bottlenecked by H2D flushes rather than arithmetic. Each of the three short-term improvements we identified targets a directly observable bottleneck in the current profile. The empirical methodology---tracking partial-match counts level by level---generalizes beyond CSM to any GPU graph mining workload that fits a level-synchronous pattern.
+We have shown that GPU acceleration of CSM is best framed as a level-synchronous BFS pipeline that consolidates the per-update search at fixed depth, rather than as a parallelized DFS. Four take-aways summarize the report:
+
+\begin{enumerate}
+  \item \textbf{BFS dominates DFS on the GPU.} On every algorithm-query pair we tried, \texttt{gpu\_bfs\_versioned} beats \texttt{gpu\_all}; the SIMT-level arguments of \S\ref{sec:bfs-vs-dfs} are matched by the empirical record.
+  \item \textbf{Large speedups are real and algorithm-spanning.} On AZ 8v, BFS-versioned achieves $21\times$--$51\times$ median speedup over a tuned single-thread CPU baseline across all five state-of-the-art CSM systems, not just one.
+  \item \textbf{The boundary failure mode is identifiable.} On LJ the BFS frontier overflows the fixed-size device buffer and the run becomes H2D-flush bound rather than arithmetic-bound; each short-term improvement in \S\ref{sec:improvements-short} (or its surrounding section) targets a directly measured bottleneck.
+  \item \textbf{Level-by-level partial-match profiling is portable.} Tracking the size of the BFS frontier at every depth, as in Figs.~\ref{fig:tree-q5} and~\ref{fig:tree-az-vs-lj}, generalizes beyond CSM to any GPU graph-mining workload that fits a level-synchronous pattern.
+\end{enumerate}
 
 \bibliographystyle{plain}
 \bibliography{report}

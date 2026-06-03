@@ -10,7 +10,7 @@
 
 \title{GPU-Accelerated Continuous Subgraph Matching}
 \subtitle{Why BFS Beats DFS on the SIMT Architecture}
-\author{Haibin Lai}
+\author{Haibin Lai \and Ziheng Wang \and Rongchuan Li}
 \institute{SUSTech HPC Lab}
 \date{June 2026}
 
@@ -51,6 +51,58 @@
   \alert{瓶颈仍在「单条更新的搜索」本身 → 上 GPU。}
 \end{frame}
 
+% ----------------------------------------------------------------
+\begin{frame}{形式化定义（沿用 ParaCOSM~\cite{paracosm2025}）}
+\begin{columns}[T]
+\begin{column}{0.55\textwidth}
+\scriptsize
+\begin{itemize}
+  \item \textbf{标签图}~$g=(V,E)$：带顶点/边标签函数 $L_V,L_E$。
+  \item \textbf{匹配 (Def.~2.2)}：$M\!:\!V(Q)\!\to\!V(G)$ 单射，满足标签 \& 邻接约束。
+  \item \textbf{图流 (Def.~2.3)}：$\Delta\mathcal{G}=(\Delta G_1,\Delta G_2,\dots)$，每个 $\Delta G=(\pm,e/v)$。
+  \item \textbf{CSM 问题 (Def.~2.4)}：对每个 $\Delta G$ 报告\\
+        $\Delta\mathcal{M}=\mathcal{M}'\!\triangle\!\mathcal{M}$。
+  \item \textbf{Compatible Set (Def.~2.5)}：$C(u,\phi)$ — 下一查询点的可行候选。
+\end{itemize}
+\end{column}
+\begin{column}{0.45\textwidth}
+\centering
+\includegraphics[width=\linewidth]{figures/csm_running_example.png}\\
+{\tiny ParaCOSM~\cite{paracosm2025} Fig.~1}
+\end{column}
+\end{columns}
+\end{frame}
+
+% ----------------------------------------------------------------
+\begin{frame}{两阶段 CSM 模型 \& Safe / Unsafe 更新}
+\begin{columns}[T]
+\begin{column}{0.5\textwidth}
+\textbf{Offline}
+\begin{itemize}
+  \item 构建辅助结构~$\mathcal{A}$
+  \item 决定匹配顺序~$\mathcal{O}$
+  \item 计算初始匹配~$\mathcal{M}_0$
+\end{itemize}
+\textbf{Online}（每条 $\Delta G$）
+\begin{enumerate}
+  \item 应用更新 + 维护 $\mathcal{A}$
+  \item 以 $e$ 为根、按 $\mathcal{O}$ 展搜索树~$\mathcal{T}$
+  \item 枚举 $\Delta\mathcal{M}$
+\end{enumerate}
+\end{column}
+\begin{column}{0.5\textwidth}
+\centering
+\includegraphics[width=\linewidth]{figures/csm_general_workflow.png}\\
+{\tiny ParaCOSM~\cite{paracosm2025} Fig.~2}
+\vspace{4pt}
+
+\scriptsize
+\textbf{ParaCOSM 关键观察}：$\geq 98.4\%$ 更新为 \emph{safe}；unsafe 触发于 label / degree / candidate 三重过滤。\\
+\alert{我们的目标：unsafe 搜索 → GPU。}
+\end{column}
+\end{columns}
+\end{frame}
+
 \begin{frame}{设计抉择：DFS 还是 BFS？}
   \begin{columns}[T]
   \begin{column}{0.5\textwidth}
@@ -81,19 +133,28 @@
 % ================================================================
 \section{系统设计}
 % ================================================================
-\begin{frame}{GPU 模块}
+\begin{frame}{GPU 模块（基于 ParaCOSM 架构）}
+  \begin{columns}[T]
+  \begin{column}{0.5\textwidth}
+  \scriptsize
   \begin{itemize}
-    \item \texttt{gpu\_classifier} \hfill mode \texttt{-m gpu} \\
+    \item \texttt{gpu\_classifier} \hfill \texttt{-m gpu} \\
           边的 safe / unsafe 分类
-    \item \texttt{gpu\_candidate\_filter} \hfill PFM2 自动 \\
-          相邻 query 顶点之间的 candidate 过滤
-    \item \texttt{gpu\_search} \hfill mode \texttt{-m gpu\_all} \\
-          DFS 风格：每线程持一个栈
-    \item \texttt{gpu\_bfs\_search} \hfill modes \texttt{-m gpu\_bfs[\_versioned]} \\
-          层同步 BFS，部分匹配集驻留 device memory
+    \item \texttt{gpu\_candidate\_filter} \hfill PFM2 \\
+          相邻 query 顶点的 candidate 过滤
+    \item \texttt{gpu\_search} \hfill \texttt{-m gpu\_all} \\
+          DFS 风格：每线程一个栈
+    \item \texttt{gpu\_bfs\_search} \hfill \texttt{-m gpu\_bfs[\_versioned]} \\
+          层同步 BFS，partial-match 驻 device
   \end{itemize}
-  \vfill
-  \textbf{Versioned 协议}：在部分匹配上挂时间戳，多条 unsafe 更新共用一次 BFS。
+  \textbf{Versioned}：部分匹配挂时间戳，多条 unsafe 共用一次 BFS。
+  \end{column}
+  \begin{column}{0.5\textwidth}
+  \centering
+  \includegraphics[width=\linewidth]{figures/csm_paracosm_arch.png}\\
+  {\tiny ParaCOSM~\cite{paracosm2025} Fig.~5；GPU 后端替换 Inter-/Inner-Update Executor。}
+  \end{column}
+  \end{columns}
 \end{frame}
 
 \begin{frame}{Versioned BFS：核心想法}
