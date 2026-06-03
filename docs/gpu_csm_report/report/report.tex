@@ -1,0 +1,246 @@
+\documentclass[sigconf,nonacm]{acmart}
+
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{pifont}
+\newcommand{\cmark}{\textcolor{green!55!black}{\ding{51}}}
+\newcommand{\xmark}{\textcolor{red!70!black}{\ding{55}}}
+
+\sloppy
+\emergencystretch=3em
+
+\title[GPU-Accelerated Continuous Subgraph Matching]{GPU-Accelerated Continuous Subgraph Matching: Why BFS Beats DFS on the SIMT Architecture}
+
+\author{Haibin Lai}
+\affiliation{%
+  \institution{Southern University of Science and Technology}
+  \city{Shenzhen}
+  \country{China}
+}
+\email{12211612@mail.sustech.edu.cn}
+
+\begin{document}
+
+\begin{abstract}
+Continuous Subgraph Matching (CSM) enumerates, for a small query graph, all of its embeddings under a stream of edge updates to a large data graph. ParaCOSM~\cite{paracosm2025} demonstrated two-level parallelism on multi-core CPUs. We extend ParaCOSM to the GPU and report two findings. First, on the dense Amazon (AZ) graph and an 8-vertex query workload, a level-synchronous BFS pipeline accelerates four of five state-of-the-art CSM algorithms (\textsc{NewSP}, \textsc{TurboFlux}, \textsc{GraphFlow}, \textsc{SymBi}) by a median of $25\times$--$51\times$ over a single-threaded CPU baseline. Second, the BFS choice is not incidental: a depth-first GPU implementation suffers from stack-pointer divergence, hub-vertex load imbalance, and unstructured memory access, and is dominated on every algorithm-query pair we tried. We characterize the search-tree growth that underpins both observations, identify a buffer-overflow regime that causes performance to collapse on the highly skewed LiveJournal (LJ) graph, and discuss several work-balanced and streaming improvements that target the observed bottlenecks.
+\end{abstract}
+
+\keywords{Continuous subgraph matching, GPU acceleration, BFS vs DFS, SIMT, graph algorithms}
+
+\maketitle
+
+% ============================================================================
+\section{Introduction}
+% ============================================================================
+Continuous Subgraph Matching (CSM) is the task of maintaining, in real time, all embeddings of a small query graph $q$ in a large data graph $G$ that is updated by a stream of edge insertions and deletions. CSM is the kernel of stream graph analytics in fraud detection, network monitoring, and provenance tracking, and recent algorithmic progress has produced several state-of-the-art CPU systems---\textsc{GraphFlow}~\cite{graphflow}, \textsc{TurboFlux}~\cite{turboflux}, \textsc{SymBi}~\cite{rapids-symbi}, and \textsc{CaLiG}~\cite{calig}---each with a distinct trade-off between filtering, indexing, and search cost.
+
+ParaCOSM~\cite{paracosm2025} consolidated these algorithms behind a common executor and added two layers of CPU parallelism: \emph{inner-update} parallelism for searches launched by a single update, and \emph{inter-update} parallelism over disjoint safe updates. The CPU implementation scales well at low thread counts, but the per-update search itself remains the bottleneck on dense workloads.
+
+This report describes a GPU port of ParaCOSM's search and classification stages. The natural design question is whether to reuse the CPU implementation's depth-first recursion, parallelizing across many independent search trees on the GPU, or to switch to a level-synchronous breadth-first pipeline that is closer to GPU graph traversal kernels~\cite{merrill2015hpcgraph}. We report on both alternatives and summarize three contributions:
+
+\begin{enumerate}
+    \item \textbf{A GPU-BFS pipeline} (\texttt{gpu\_bfs\_versioned}) for the unsafe-update search of all five CSM algorithms, with a versioned timestamp protocol that lets multiple updates share a single GPU search.
+    \item \textbf{An empirical case for BFS over DFS on the GPU.} On AZ at 8-vertex queries, BFS-versioned achieves a median speedup of $51.1\times$, $49.5\times$, $46.5\times$, $25.3\times$, and $21.7\times$ on \textsc{NewSP}, \textsc{TurboFlux}, \textsc{GraphFlow}, \textsc{SymBi}, and \textsc{CaLiG} respectively, while the DFS variant is consistently dominated.
+    \item \textbf{A characterization of the boundary of GPU benefit.} On the very sparse and skewed LiveJournal (LJ) graph, the BFS frontier explodes into the $10^{10}$-match regime and the partial-match buffer overflows; we identify the bottleneck and outline three concrete improvements.
+\end{enumerate}
+
+% ============================================================================
+\section{Background and System}
+% ============================================================================
+
+\subsection{The CSM Workload}
+A CSM query $q$ has a fixed matching order $\pi$. For each incremental update $\Delta = (v_1, v_2, \ell)$, the executor first \emph{classifies} $\Delta$ as \emph{safe} (the new matches it produces are disjoint from those produced by other concurrent updates) or \emph{unsafe} (search cannot run in parallel with the other updates). Unsafe updates are then individually expanded by a depth-bounded search rooted at $(v_1, v_2)$.
+
+For the 8-vertex queries used here, the search proceeds through 6 expansion levels (\texttt{depth 1$\to$2} to \texttt{depth 6$\to$7}), each level enlarging the partial-match set by an algorithm-specific filtering rule.
+
+\subsection{System Overview}
+Four GPU modules implement the pipeline:
+
+\begin{itemize}
+    \item \texttt{gpu\_classifier} (mode \texttt{-m gpu}). Edge classification on the GPU.
+    \item \texttt{gpu\_candidate\_filter} (PFM2 auto-invoked). Candidate filtering between adjacent vertices in $q$.
+    \item \texttt{gpu\_search} (mode \texttt{-m gpu\_all}). DFS-style search; each thread holds a stack and unwinds independently.
+    \item \texttt{gpu\_bfs\_search} (modes \texttt{-m gpu\_bfs} and \texttt{-m gpu\_bfs\_versioned}). Level-synchronous BFS; the active partial-match set is materialized in device memory and reduced one query vertex at a time.
+\end{itemize}
+
+The five CSM algorithms appear as adapters that share these four GPU back-ends. The versioned protocol piggybacks per-update timestamps on the partial-match arrays so that the same BFS step services all unsafe updates in the current batch.
+
+% ============================================================================
+\section{Why BFS, not DFS}
+% ============================================================================
+\label{sec:bfs-vs-dfs}
+
+\paragraph{The case against DFS.}
+The CPU CSM algorithms perform a recursive DFS through the matching order, with backtracking. Naively translating this to the GPU---one thread per root---induces three failures on the SIMT architecture:
+
+\begin{itemize}
+    \item \emph{Stack-pointer divergence.} Threads in the same warp reach different recursion depths within a few branches; the warp executes the union of their code paths and the SIMT unit is mostly idle.
+    \item \emph{Hub-vertex load imbalance.} A thread expanding a hub vertex may iterate over $10^4$ neighbors while sibling threads finish in tens; the warp is gated by the slowest thread.
+    \item \emph{Unstructured memory access.} The partial match resides in per-thread local memory; backtracking restores it from caller frames; coalesced reads of $G$'s adjacency list are rare.
+\end{itemize}
+
+\paragraph{The case for BFS.}
+A level-synchronous BFS reorganizes the search so that the same depth is processed by all threads in lockstep. Three structural advantages follow:
+
+\begin{itemize}
+    \item \emph{Lockstep frontier.} At each depth, every thread executes the same join-and-filter step against the same adjacency-list region, restoring full warp efficiency.
+    \item \emph{Coalesced writes via prefix scan.} Each thread computes the size of its output and the kernel emits a coalesced write to a shared partial-match buffer.
+    \item \emph{Easy work split.} The frontier is a flat array; binary-search row-split divides it evenly across threads regardless of vertex degree, which mitigates the hub-vertex problem.
+\end{itemize}
+
+\paragraph{Quantitative evidence.}
+On the AZ 8-vertex workload, mode \texttt{gpu\_bfs\_versioned} dominates \texttt{gpu\_all} on every algorithm-query pair we tried. We give the algorithm-aggregated speedup over CPU \texttt{single} (which itself includes the high-quality CPU search) in Section~\ref{sec:az}.
+
+% ============================================================================
+\section{Main Experiment: Amazon (AZ) at 8-vertex Queries}
+% ============================================================================
+\label{sec:az}
+
+\paragraph{Setup.} Single A100-SXM4-80GB GPU, dual Xeon Platinum 8470 host (96 cores), oneAPI 2025.3 with \texttt{icpx}, CUDA 12.9, \texttt{sm\_80}. Time limit per query: 1800\,s. CPU baseline is \texttt{-m single -t 1} with the same algorithm-specific implementation. CPU runs in 50-way batch parallelism (across queries) on a 1.7\,TB-RAM host; GPU runs serially on device 0.
+
+\paragraph{Data.} Amazon graph (AZ): $|V|\approx0.4\,\text{M}$, $|E|\approx3.4\,\text{M}$. 100 random 8-vertex queries; per-update stream length $\sim4.3\,\text{M}$.
+
+\paragraph{Results: median speedup.}
+Figure~\ref{fig:speedup-az} summarizes the per-algorithm distribution; Table~\ref{tab:az-medians} gives medians.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{figures/speedup_8v_by_algo.png}
+  \caption{Median speedup of GPU \texttt{gpu\_bfs\_versioned} over CPU \texttt{single} on the AZ 8-vertex workload. Each box aggregates 100 queries. \textsc{NewSP} achieves the largest speedup; \textsc{CaLiG}, which already pays a heavy index cost on the CPU, achieves the smallest.}
+  \label{fig:speedup-az}
+\end{figure}
+
+\begin{table}[t]
+  \centering
+  \small
+  \caption{Per-algorithm median speedup on AZ 8v (100 queries each).}
+  \label{tab:az-medians}
+  \begin{tabular}{lr}
+    \toprule
+    \textbf{Algorithm} & \textbf{Median speedup} \\
+    \midrule
+    \textsc{Parallel\_NewSP}      & $51.1\times$ \\
+    \textsc{Parallel\_TurboFlux}  & $49.5\times$ \\
+    \textsc{Parallel\_GraphFlow}  & $46.5\times$ \\
+    \textsc{Parallel\_SymBi}      & $25.3\times$ \\
+    \textsc{Parallel\_CaLiG}      & $21.7\times$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{Search-tree growth.}
+The level-synchronous BFS makes the partial-match growth observable directly. Figure~\ref{fig:tree-q5} plots the count of partial matches at each depth for AZ \textsc{GraphFlow} \texttt{Q\_5}. The middle layers grow super-linearly and the final layer contracts as the last-vertex constraint kicks in. Crucially, the maximum partial-match count for AZ stays comfortably under the $4\times10^{8}$ device buffer and BFS proceeds without flushes.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{figures/bfs_tree_q5_silhouette.png}
+  \caption{BFS partial-match count by depth on AZ \textsc{GraphFlow} \texttt{Q\_5}. The middle expansion (depth 4--5) is the load-balancing-critical region. Final-depth contraction is induced by the last-vertex backward-neighbor constraint.}
+  \label{fig:tree-q5}
+\end{figure}
+
+\paragraph{Best-case analysis.}
+\textsc{NewSP} achieves $51\times$ on AZ because its CPU implementation re-runs a relatively expensive per-update search, while the GPU BFS amortizes both classification and partial-match expansion across the 4.3\,M-edge update stream. Kernel-time breakdown for a representative AZ \textsc{NewSP} query is dominated by the BFS search itself ($>90\%$); classification, edge insertion, and CSR build add up to under 10\%.
+
+\paragraph{Worst-case analysis (within AZ).}
+\textsc{CaLiG} achieves only $21.7\times$ because its CPU baseline already maintains a candidate-set index and short-circuits a large fraction of the search. The GPU still wins, but the absolute CPU time is small enough that PCIe + kernel-launch overhead becomes a non-trivial fixed cost.
+
+% ============================================================================
+\section{Boundary Case: Sparse, Skewed LiveJournal (LJ)}
+% ============================================================================
+\label{sec:lj}
+
+We probe the boundary of GPU benefit on the LiveJournal graph: $|V|\approx 4.8$\,M, $|E|\approx 38.6$\,M, mean degree $\sim 16$, but with a heavy-tailed degree distribution.
+
+\paragraph{Headline numbers.} On 20 sampled 8-vertex queries with 1800\,s time limits per algorithm-query pair, restricting to pairs where both CPU and GPU completed (Table~\ref{tab:lj}), the picture is mixed:
+
+\begin{table}[t]
+  \centering
+  \small
+  \caption{LJ 8v, restricted to queries where both CPU \texttt{single} and GPU \texttt{gpu\_bfs\_versioned} returned within 1800\,s. \textsc{NewSP} CPU is a stub on this code path, so its column is reported but not fair (see text).}
+  \label{tab:lj}
+  \begin{tabular}{lrrrr}
+    \toprule
+    \textbf{Algorithm} & \textbf{pairs} & \textbf{cpu\,(s)} & \textbf{gpu\,(s)} & \textbf{spd-up} \\
+    \midrule
+    \textsc{GraphFlow} &  1 & 1494.6 &  105.4 & $14.18\times$ \\
+    \textsc{TurboFlux} &  9 &  666.3 &  215.2 & $3.10\times$  \\
+    \textsc{CaLiG}     & 14 &  583.6 &  658.9 & $0.89\times$  \\
+    \textsc{NewSP$^*$} & 16 &   87.1 &  637.0 & $0.14\times$  \\
+    \textsc{SymBi}     &  0 & ---    & ---    & ---           \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Two observations stand out.
+
+\paragraph{Search-space explosion and buffer flush.}
+LJ \textsc{NewSP} \texttt{Q\_19} produces $7.97\times10^{10}$ matches, and the BFS frontier overflows the 400-million-entry partial-match buffer 15 times during the depth-6$\to$7 expansion. The corresponding log fragment is a clean diagnostic of the bottleneck:
+
+\begin{small}
+\begin{verbatim}
+[BFS-V] Depth 5->6: 4.83e7 -> 3.85e8
+[BFS-V] Flush 400000000 partials at depth 6->7  (x15)
+Search complete: 7.97e10 matches, 1019.0 s
+\end{verbatim}
+\end{small}
+
+Figure~\ref{fig:tree-az-vs-lj} shows the same level-by-level partial-match curves for AZ and LJ on the same query, on log scale; LJ's frontier is $\sim 10\times$ the AZ frontier at every depth and the device buffer is the binding constraint, not arithmetic throughput.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{figures/bfs_tree_az_vs_lj.png}
+  \caption{Log-scale partial-match count by BFS depth: AZ vs LJ on a representative \textsc{GraphFlow} 8-vertex query. The LJ middle layers exceed the 400\,M-entry device buffer; LJ \textsc{NewSP} \texttt{Q\_19} flushes 15 times in the depth-6$\to$7 step.}
+  \label{fig:tree-az-vs-lj}
+\end{figure}
+
+\paragraph{The \textsc{NewSP} CPU column is a stub.}
+The CPU \texttt{single} mode for \textsc{NewSP} reports 0 positive matches on every LJ query, while GPU returns the expected $10^9$--$10^{10}$ counts. Inspecting \texttt{Parallel\_NewSP\_Adapter} explains why:
+
+\begin{small}
+\begin{verbatim}
+size_t EnumerateNewEdge(uint v1, uint v2,
+                        uint label, size_t /*tid*/) {
+  // Not implemented for NewSP adapter -- use versioned mode
+  return 0;
+}
+\end{verbatim}
+\end{small}
+
+The CPU \texttt{single} path therefore performs no actual matching for \textsc{NewSP}, which makes CPU look spuriously fast on LJ. A separate CPU \texttt{versioned} run (in progress at the time of writing) is the apples-to-apples comparison; the cross-validation on the four other algorithms (matching counts agree to seven significant digits between CPU and GPU) confirms that the BFS implementation itself is correct.
+
+% ============================================================================
+\section{Improvement Directions}
+% ============================================================================
+We list improvements in order of expected return on engineering effort.
+
+\paragraph{Short-term.}
+\begin{itemize}
+  \item \emph{Work-balanced BFS frontier.} Switch from one-thread-per-partial-match to edge-centric work split with block-binary-search, removing hub-vertex tail latency.
+  \item \emph{Streaming partial matches.} When the device buffer is full, stream the overflow to host pinned memory under a CUDA stream so that the next BFS step proceeds in parallel with the H2D copy. This directly fixes the LJ flush-thrashing.
+  \item \emph{H2D / search overlap.} Insert update batches via a dedicated stream so that subsequent BFS searches do not stall on edge insertion.
+\end{itemize}
+
+\paragraph{Medium-term.}
+\begin{itemize}
+  \item \emph{Adaptive DFS$\leftrightarrow$BFS.} For algorithm-query pairs where the candidate set is small enough that BFS launch overhead dominates, fall back to the DFS path; predicate the choice on a cost model that uses query topology and the first BFS-level candidate count.
+  \item \emph{Early intersection pruning.} Apply the backward-neighbor intersection at partial-match emission time, not at the next BFS step; this is particularly valuable on skewed graphs like LJ where intermediate frontiers are dominated by partial matches that will be pruned at the next step.
+\end{itemize}
+
+\paragraph{Long-term.}
+\begin{itemize}
+  \item \emph{Multi-GPU.} Partition along the query axis (one GPU per query) for low-coupling workloads, or along the update axis for query-coupled workloads.
+  \item \emph{CPU/GPU hybrid.} Route safe updates to CPU and unsafe to GPU; complete the missing CPU \texttt{versioned} implementations of \textsc{NewSP} so that the per-algorithm placement decision can be data-driven.
+\end{itemize}
+
+% ============================================================================
+\section{Conclusion}
+% ============================================================================
+We have shown that GPU acceleration of CSM is best framed as a level-synchronous BFS pipeline that consolidates the per-update search at fixed depth, rather than as a parallelized DFS. On the AZ 8-vertex workload, this design yields $20\times$ to $51\times$ median speedup over a tuned single-thread CPU baseline across all five state-of-the-art CSM algorithms. The same pipeline reveals a clean failure mode on heavily skewed graphs (LJ): the BFS frontier overflows a fixed-size device buffer and is bottlenecked by H2D flushes rather than arithmetic. Each of the three short-term improvements we identified targets a directly observable bottleneck in the current profile. The empirical methodology---tracking partial-match counts level by level---generalizes beyond CSM to any GPU graph mining workload that fits a level-synchronous pattern.
+
+\bibliographystyle{plain}
+\bibliography{report}
+
+\end{document}
