@@ -9,9 +9,11 @@ $(PAPER).pdf: $(PAPER).tex $(PAPER).bib
 	pdflatex -interaction=nonstopmode $(PAPER) || true
 	pdflatex -interaction=nonstopmode $(PAPER)
 
-$(SLIDES).pdf: $(SLIDES).tex
-	pdflatex -interaction=nonstopmode $(SLIDES) || true
-	pdflatex -interaction=nonstopmode $(SLIDES)
+$(SLIDES).pdf: $(SLIDES).tex $(PAPER).bib
+	-pdflatex -interaction=nonstopmode $(SLIDES)
+	-bibtex $(SLIDES)
+	-pdflatex -interaction=nonstopmode $(SLIDES)
+	-pdflatex -interaction=nonstopmode $(SLIDES)
 
 slides: $(SLIDES).pdf
 

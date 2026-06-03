@@ -29,9 +29,19 @@
 \begin{frame}{Continuous Subgraph Matching (CSM)}
   \textbf{任务}：在动态图 $G$ 上，对每个边更新 $\Delta=(v_1,v_2,\ell)$，实时枚举小查询图 $q$ 的所有嵌入。
   \begin{itemize}
-    \item \textbf{应用}：欺诈检测 / 网络监控 / 数据溯源
-    \item \textbf{现有 CPU 系统}：GraphFlow、TurboFlux、SymBi、CaLiG、NewSP
-    \item \textbf{ParaCOSM (ICPP'25)}：把 5 种算法接到统一执行器，加上两层 CPU 并行
+    \item \textbf{应用}
+    \begin{itemize}
+      \item 金融风控 \& 交易图监测 — Bytedance BG3~\cite{zhang2024bg3}
+      \item 实时推荐 — Twitter motif detection~\cite{gupta2014twitter}
+      \item 网络安全 \& 僵尸网络检测~\cite{lagraa2024network}
+    \end{itemize}
+    \item \textbf{现有 CPU 系统}：
+    GraphFlow~\cite{graphflow},
+    TurboFlux~\cite{turboflux},
+    SymBi~\cite{rapids-symbi},
+    CaLiG~\cite{calig},
+    NewSP~\cite{newsp}
+    \item \textbf{ParaCOSM (ICPP'25)}~\cite{paracosm2025}：把 5 种算法接到统一执行器，加上两层 CPU 并行
     \begin{itemize}
       \item Inner-update：单条更新内的搜索并行
       \item Inter-update：safe 更新之间的并行
@@ -276,6 +286,13 @@ Search complete: 7.97e10 matches, 1019.0 s
   \footnotesize
   代码：ParaCOSM, branch \texttt{feat/gpu-profiling-charts}\\
   报告 \& 数据：\texttt{docs/gpu\_csm\_report/}
+\end{frame}
+
+% ----------------------------------------------------------------
+\begin{frame}[allowframebreaks]{参考文献}
+  \tiny
+  \bibliographystyle{plain}
+  \bibliography{report}
 \end{frame}
 
 \end{document}

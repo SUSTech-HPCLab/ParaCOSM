@@ -1,55 +1,131 @@
+% =============================================================
+% Bibliography for the GPU-CSM report. Entries match algorithms
+% and applications cited by ParaCOSM (ICPP'25).
+% Keys retained for backward-compatibility with report.tex.
+% =============================================================
+
 @inproceedings{paracosm2025,
-  title     = {{ParaCOSM}: Two-Level Parallel Continuous Subgraph Matching},
-  author    = {Lai, Haibin and others},
-  booktitle = {Proc. ICPP},
+  title     = {{ParaCOSM}: A Parallel Framework for Continuous Subgraph Matching},
+  author    = {Lai, Haibin and Zhou, Sicheng and Fan, Site and Li, Zhuozhao},
+  booktitle = {Proceedings of the 54th International Conference on Parallel Processing (ICPP'25)},
   year      = {2025}
 }
 
-@inproceedings{rapids-symbi,
-  title     = {{SymBi}: Continuous Subgraph Matching by Symmetric Bidirectional DAG-Based Filtering},
-  author    = {Han, Shixuan and others},
+% --- Five CSM algorithms parallelized in ParaCOSM ---------------
+
+@inproceedings{graphflow,
+  title     = {{Graphflow}: An Active Graph Database},
+  author    = {Kankanamge, Chathura and Sahu, Siddhartha and Mhedbhi, Amine and Chen, Jeremy and Salihoglu, Semih},
   booktitle = {SIGMOD},
-  year      = {2022}
+  year      = {2017},
+  pages     = {1695--1698}
 }
 
 @inproceedings{turboflux,
   title     = {{TurboFlux}: A Fast Continuous Subgraph Matching System for Streaming Graph Data},
-  author    = {Kim, Kyoungmin and others},
+  author    = {Kim, Kyoungmin and Seo, In and Han, Wook-Shin and Lee, Jeong-Hoon and Hong, Sungpack and Chafi, Hassan and Shin, Hyungyu and Jeong, Geonhwa},
   booktitle = {SIGMOD},
-  year      = {2018}
+  year      = {2018},
+  pages     = {411--426}
 }
 
-@inproceedings{graphflow,
-  title     = {{Graphflow}: An Active Graph Database},
-  author    = {Kankanamge, Chathura and others},
-  booktitle = {SIGMOD},
-  year      = {2017}
+@article{rapids-symbi,
+  title   = {Symmetric Continuous Subgraph Matching with Bidirectional Dynamic Programming},
+  author  = {Min, Seunghwan and Park, Sung Gwan and Park, Kunsoo and Giammarresi, Dora and Italiano, Giuseppe F. and Han, Wook-Shin},
+  journal = {Proc. VLDB Endow.},
+  volume  = {14},
+  number  = {8},
+  pages   = {1298--1310},
+  year    = {2021}
 }
 
-@inproceedings{calig,
-  title     = {{CaLiG}: Constraint-aware Continuous Subgraph Matching with Lightweight Index},
-  author    = {Author, A. and others},
-  booktitle = {ICDE},
-  year      = {2024}
+@article{calig,
+  title   = {Fast Continuous Subgraph Matching over Streaming Graphs via Backtracking Reduction},
+  author  = {Yang, Rongjian and Zhang, Zhijie and Zheng, Weiguo and Yu, Jeffrey Xu},
+  journal = {Proc. ACM Manag. Data},
+  volume  = {1},
+  number  = {1},
+  pages   = {Article 15, 26 pages},
+  year    = {2023}
 }
+
+@inproceedings{newsp,
+  title     = {{NewSP}: A New Search Process for Continuous Subgraph Matching over Dynamic Graphs},
+  author    = {Li, Ziming and Li, Youhuan and Chen, Xinhuan and Zou, Lei and Li, Yang and Yang, Xiaofeng and Jiang, Hongbo},
+  booktitle = {2024 IEEE 40th International Conference on Data Engineering (ICDE)},
+  year      = {2024},
+  pages     = {3324--3337}
+}
+
+% --- Applications motivating CSM (cited by ParaCOSM intro) ------
+
+@article{gupta2014twitter,
+  title   = {Real-time Twitter Recommendation: Online Motif Detection in Large Dynamic Graphs},
+  author  = {Gupta, Pankaj and Satuluri, Venu and Grewal, Ajeet and Gurumurthy, Siva and Zhabiuk, Volodymyr and Li, Quannan and Lin, Jimmy},
+  journal = {Proc. VLDB Endow.},
+  volume  = {7},
+  number  = {13},
+  pages   = {1379--1380},
+  year    = {2014}
+}
+
+@inproceedings{zhang2024bg3,
+  title     = {{BG3}: A Cost Effective and {I/O} Efficient Graph Database in Bytedance},
+  author    = {Zhang, Wei and Chen, Cheng and Wang, Qiange and Wang, Wei and Yang, Shijiao and Zhou, Bingyu and Zhu, Huiming and Chen, Chao and Zhao, Yongjun and Hu, Yingqian and Cheng, Miaomiao and Li, Meng and Tan, Hongfei and Liu, Mengjin and Lin, Hexiang and Zhang, Shuai and Zhang, Lei},
+  booktitle = {Companion of the 2024 International Conference on Management of Data (SIGMOD/PODS '24)},
+  year      = {2024},
+  pages     = {360--372}
+}
+
+@article{lagraa2024network,
+  title   = {A Review on Graph-based Approaches for Network Security Monitoring and Botnet Detection},
+  author  = {Lagraa, Sofiane and Hus{\'a}k, Martin and Seba, Hamida and Vuppala, Satyanarayana and State, Radu and Ouedraogo, Moussa},
+  journal = {International Journal of Information Security},
+  volume  = {23},
+  number  = {1},
+  pages   = {119--140},
+  year    = {2024}
+}
+
+% --- Related GPU subgraph-matching systems ----------------------
+
+@inproceedings{wei2024gcsm,
+  title     = {{GCSM}: {GPU}-Accelerated Continuous Subgraph Matching for Large Graphs},
+  author    = {Wei, Yihua and Jiang, Peng},
+  booktitle = {2024 IEEE International Parallel and Distributed Processing Symposium (IPDPS)},
+  year      = {2024},
+  pages     = {1046--1057}
+}
+
+@inproceedings{qiu2024gpubatch,
+  title     = {{GPU}-Accelerated Batch-Dynamic Subgraph Matching},
+  author    = {Qiu, Linshan and Chen, Lu and Jie, Hailiang and Ke, Xiangyu and Gao, Yunjun and Liu, Yang and Zhang, Zetao},
+  booktitle = {2024 IEEE 40th International Conference on Data Engineering (ICDE)},
+  year      = {2024},
+  pages     = {3204--3216}
+}
+
+@inproceedings{xiang2021cuts,
+  title     = {{cuTS}: Scaling Subgraph Isomorphism on Distributed Multi-{GPU} Systems Using Trie Based Data Structure},
+  author    = {Xiang, Lizhi and Khan, Arif and Serra, Edoardo and Halappanavar, Mahantesh and Sukumaran-Rajam, Aravind},
+  booktitle = {SC21: International Conference for High Performance Computing, Networking, Storage and Analysis},
+  year      = {2021},
+  pages     = {1--13}
+}
+
+@inproceedings{lin2025jupiter,
+  title     = {{Jupiter}: Pushing Speed and Scalability Limitations for Subgraph Matching on Multi-{GPUs}},
+  author    = {Lin, Zhiheng and Meng, Ke and Xu, Changjie and Cao, Weichen and Tan, Guangming},
+  booktitle = {Proceedings of the Twentieth European Conference on Computer Systems (EuroSys '25)},
+  year      = {2025},
+  pages     = {558--572}
+}
+
+% --- GPU graph traversal primitive ------------------------------
 
 @article{merrill2015hpcgraph,
-  title  = {High-Performance and Scalable {GPU} Graph Traversal},
-  author = {Merrill, Duane and Garland, Michael and Grimshaw, Andrew},
-  journal= {ACM Transactions on Parallel Computing},
-  year   = {2015}
-}
-
-@inproceedings{guo2020gsi,
-  title     = {{GSI}: {GPU}-friendly Subgraph Isomorphism},
-  author    = {Guo, Wentian and Li, Yuchen and Sha, Mo and Tan, Kian-Lee},
-  booktitle = {ICDE},
-  year      = {2020}
-}
-
-@inproceedings{sun2020rapidmatch,
-  title     = {{RapidMatch}: A Holistic Approach to Subgraph Query Processing},
-  author    = {Sun, Shixuan and Sun, Xibo and Che, Bingsheng and Luo, Qiong},
-  booktitle = {VLDB},
-  year      = {2020}
+  title   = {High-Performance and Scalable {GPU} Graph Traversal},
+  author  = {Merrill, Duane and Garland, Michael and Grimshaw, Andrew},
+  journal = {ACM Transactions on Parallel Computing},
+  year    = {2015}
 }
