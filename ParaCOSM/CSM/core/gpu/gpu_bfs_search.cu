@@ -500,6 +500,128 @@ __global__ void bfs_expand_count_kernel(
 }
 
 // ============================================================
+// LJ variant (sparse graphs): inner-parallel fused count.
+// Profile on LiveJournal showed bfs_expand_count_kernel hit only 1.64/32 active
+// threads: it splits the OUTER candidate list (order[Q-2]) across lanes, but on
+// sparse/heavily-filtered graphs that list is short, so most lanes idle while a
+// few do the deep inner sweep. This variant flips it: the warp iterates the
+// outer candidate v *together* (uniform), and splits the INNER candidate list
+// (order[Q-1]) across the 32 lanes. When the inner list is long (hubs on LJ),
+// all lanes stay busy. Identical match semantics → same count.
+// Selected at runtime for low-unsafe-edge / sparse workloads.
+// ============================================================
+__global__ void bfs_expand_count_lj_kernel(
+    const uint32_t* __restrict__ csr_offsets,
+    const uint32_t* __restrict__ csr_neighbors,
+    const uint32_t* __restrict__ csr_elabels,
+    const uint32_t* __restrict__ vlabels,
+    const uint32_t* __restrict__ degrees,  // NULL for compact CSR
+    const uint32_t* __restrict__ all_orders,
+    const uint32_t* __restrict__ in_buf,
+    uint32_t in_count,
+    uint64_t* __restrict__ result_count,
+    uint32_t depth,   // = Q-2
+    uint32_t Q
+) {
+    uint64_t gtid = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    uint32_t warp_id = (uint32_t)(gtid >> 5);
+    uint32_t lane = (uint32_t)(gtid & 31u);
+    if (warp_id >= in_count) return;
+
+    uint32_t stride = Q + 1;
+    const uint32_t* pm = in_buf + (size_t)warp_id * stride;
+    uint32_t order_idx = pm[0];
+    const uint32_t* m = pm + 1;
+
+    const uint32_t* order = all_orders + order_idx * Q;
+    uint32_t u  = order[depth];
+    uint32_t u2 = order[depth + 1];
+
+    // pivot for u (warp-uniform: every lane computes the same)
+    uint32_t u_min = UINT32_MAX, u_min_label = 0, u_min_deg = UINT32_MAX;
+    uint32_t qs = bfs_q_offsets[u], qe = bfs_q_offsets[u + 1];
+    for (uint32_t j = qs; j < qe; j++) {
+        uint32_t uo = bfs_q_neighbors[j];
+        if (m[uo] == UINT32_MAX) continue;
+        uint32_t off = csr_offsets[m[uo]];
+        uint32_t deg = (bfs_use_padded && degrees) ? degrees[m[uo]] : (csr_offsets[m[uo] + 1] - off);
+        if (deg < u_min_deg) { u_min_deg = deg; u_min = uo; u_min_label = bfs_q_elabels[j]; }
+    }
+    if (u_min == UINT32_MAX) return;
+
+    uint32_t nbr_start = csr_offsets[m[u_min]];
+    uint32_t nbr_count = (bfs_use_padded && degrees) ? degrees[m[u_min]] : (csr_offsets[m[u_min] + 1] - nbr_start);
+    uint32_t q2s = bfs_q_offsets[u2], q2e = bfs_q_offsets[u2 + 1];
+
+    uint64_t local_count = 0;
+
+    // OUTER: whole warp walks the same v sequentially (warp-uniform).
+    for (uint32_t i = 0; i < nbr_count; i++) {
+        uint32_t v = csr_neighbors[nbr_start + i];
+        if (vlabels[v] != bfs_q_vlabels[u]) continue;
+        if (csr_elabels[nbr_start + i] != u_min_label) continue;
+        bool joinable = true;
+        for (uint32_t j = qs; j < qe; j++) {
+            uint32_t uo = bfs_q_neighbors[j];
+            if (m[uo] == UINT32_MAX || uo == u_min) continue;
+            uint32_t s = csr_offsets[m[uo]];
+            uint32_t nc = (bfs_use_padded && degrees) ? degrees[m[uo]] : (csr_offsets[m[uo] + 1] - s);
+            int pos = bfs_bsearch(csr_neighbors + s, nc, v);
+            if (pos < 0 || csr_elabels[s + pos] != bfs_q_elabels[j]) { joinable = false; break; }
+        }
+        if (!joinable) continue;
+        bool vis = false;
+        for (uint32_t d = 0; d < Q; d++) { if (m[d] == v) { vis = true; break; } }
+        if (vis) continue;
+
+        // u2 pivot given m[u]=v (warp-uniform)
+        uint32_t u2_min = UINT32_MAX, u2_min_label = 0, u2_min_deg = UINT32_MAX;
+        for (uint32_t j = q2s; j < q2e; j++) {
+            uint32_t uo = bfs_q_neighbors[j];
+            uint32_t muo = (uo == u) ? v : m[uo];
+            if (muo == UINT32_MAX) continue;
+            uint32_t off = csr_offsets[muo];
+            uint32_t deg = (bfs_use_padded && degrees) ? degrees[muo] : (csr_offsets[muo + 1] - off);
+            if (deg < u2_min_deg) { u2_min_deg = deg; u2_min = uo; u2_min_label = bfs_q_elabels[j]; }
+        }
+        if (u2_min == UINT32_MAX) continue;
+
+        uint32_t m_u2min = (u2_min == u) ? v : m[u2_min];
+        uint32_t ns2 = csr_offsets[m_u2min];
+        uint32_t nc2 = (bfs_use_padded && degrees) ? degrees[m_u2min] : (csr_offsets[m_u2min + 1] - ns2);
+
+        // INNER: 32 lanes split the w candidate list (long on hubs → lanes busy).
+        for (uint32_t k = lane; k < nc2; k += 32) {
+            uint32_t w = csr_neighbors[ns2 + k];
+            if (vlabels[w] != bfs_q_vlabels[u2]) continue;
+            if (csr_elabels[ns2 + k] != u2_min_label) continue;
+            bool jn = true;
+            for (uint32_t j = q2s; j < q2e; j++) {
+                uint32_t uo = bfs_q_neighbors[j];
+                if (uo == u2_min) continue;
+                uint32_t muo = (uo == u) ? v : m[uo];
+                if (muo == UINT32_MAX) continue;
+                uint32_t s = csr_offsets[muo];
+                uint32_t nc = (bfs_use_padded && degrees) ? degrees[muo] : (csr_offsets[muo + 1] - s);
+                int pos = bfs_bsearch(csr_neighbors + s, nc, w);
+                if (pos < 0 || csr_elabels[s + pos] != bfs_q_elabels[j]) { jn = false; break; }
+            }
+            if (!jn) continue;
+            bool vis2 = (w == v);
+            if (!vis2) for (uint32_t d = 0; d < Q; d++) { if (m[d] == w) { vis2 = true; break; } }
+            if (vis2) continue;
+            local_count++;
+        }
+    }
+
+    local_count = warp_reduce_add_u64(local_count);
+    if (lane == 0 && local_count > 0) {
+        atomicAdd(reinterpret_cast<unsigned long long*>(result_count),
+                  static_cast<unsigned long long>(local_count));
+    }
+}
+
+// ============================================================
 // Versioned Kernels: each partial match carries max_ts
 // Partial match layout: [order_idx, max_ts, m[0], ..., m[Q-1]]
 //                        stride = Q + 2
@@ -781,6 +903,20 @@ void GPUBFSSearch::BuildCSR(const Graph& data) {
 
     uint32_t V = data.NumVertices();
     num_vertices_ = V;
+
+    // Select the fused-count kernel variant. Default heuristic: large, sparse
+    // graphs (many vertices, low avg degree) behave like LiveJournal — short
+    // outer candidate lists starve the outer-parallel kernel, so use the
+    // inner-parallel LJ kernel. Env GPU_BFS_SPARSE=0/1 forces it for A/B tests.
+    {
+        const char* e = getenv("GPU_BFS_SPARSE");
+        if (e) {
+            sparse_mode_ = (e[0] == '1');
+        } else {
+            double avg_deg = V ? (double)data.NumEdges() * 2.0 / V : 0.0;
+            sparse_mode_ = (V >= 1000000 && avg_deg < 32.0);  // LJ-like
+        }
+    }
 
     std::vector<uint32_t> offsets(V + 1);
     offsets[0] = 0;
@@ -1069,13 +1205,24 @@ void GPUBFSSearch::BFSFromDepth(uint32_t* in_buf, uint32_t in_count,
         // explicit two-kernel flow (timestamp logic).
         if (!versioned && depth == Q - 2 && Q >= 3) {
             grid = (uint32_t)(((uint64_t)cur_count * 32 + block - 1) / block);
-            bfs_expand_count_kernel<<<grid, block>>>(
-                d_csr_offsets_, d_csr_neighbors_, d_csr_elabels_, d_vlabels_,
-                d_degrees_, d_all_orders_, cur_buf, cur_count, d_result_, depth, Q
-            );
+            // Pick fusion kernel by graph density (set in BuildCSR). Sparse
+            // graphs (LJ) have short outer candidate lists → the default
+            // outer-parallel kernel starves lanes (1.64/32); the LJ variant
+            // parallelises the inner list instead.
+            if (sparse_mode_) {
+                bfs_expand_count_lj_kernel<<<grid, block>>>(
+                    d_csr_offsets_, d_csr_neighbors_, d_csr_elabels_, d_vlabels_,
+                    d_degrees_, d_all_orders_, cur_buf, cur_count, d_result_, depth, Q
+                );
+            } else {
+                bfs_expand_count_kernel<<<grid, block>>>(
+                    d_csr_offsets_, d_csr_neighbors_, d_csr_elabels_, d_vlabels_,
+                    d_degrees_, d_all_orders_, cur_buf, cur_count, d_result_, depth, Q
+                );
+            }
             CUDA_CHECK(cudaGetLastError());
-            printf("[BFS] Fused depth %u->%u (count, no materialise): %u input pm\n",
-                   depth, depth + 1, cur_count);
+            printf("[BFS] Fused depth %u->%u (%s count, no materialise): %u input pm\n",
+                   depth, depth + 1, sparse_mode_ ? "LJ inner-par" : "outer-par", cur_count);
             break;  // final level handled; done
         }
 

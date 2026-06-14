@@ -78,6 +78,7 @@ private:
     bool csr_built_ = false;
     bool query_set_ = false;
     bool padded_csr_ = false;  // true if using padded CSR
+    bool sparse_mode_ = false; // true → use inner-parallel LJ fused-count kernel
 
     // Device CSR
     uint32_t* d_csr_offsets_ = nullptr;
