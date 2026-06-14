@@ -49,6 +49,41 @@ __device__ __forceinline__ int bfs_bsearch(
 }
 
 // ============================================================
+// OPT(B): warp-aggregated atomic increment.
+// Each active lane reserves a unique slot, but only ONE atomicAdd is issued
+// per warp-group instead of one per lane. Correct inside divergent loops:
+// __activemask() captures exactly the lanes converged at this call site.
+// The set of returned slots is identical to per-lane atomicAdd(ctr,1) (a
+// permutation), and the final counter value is unchanged.
+// ============================================================
+__device__ __forceinline__ uint32_t warp_agg_inc(uint32_t* ctr) {
+    uint32_t mask = __activemask();
+    uint32_t lane = threadIdx.x & 31u;
+    uint32_t leader = __ffs(mask) - 1;
+    uint32_t rank = __popc(mask & ((1u << lane) - 1u)); // active lanes before me
+    uint32_t base = 0;
+    if (lane == leader) {
+        base = atomicAdd(ctr, __popc(mask));            // one atomic for the group
+    }
+    base = __shfl_sync(mask, base, leader);             // broadcast group base
+    return base + rank;
+}
+
+// ============================================================
+// OPT(C): warp-level sum reduction of a per-lane uint64 counter.
+// Standard butterfly reduction. Requires the whole warp converged here, which
+// the callers guarantee: the only per-warp early-return (`warp_id >= in_count`
+// and `u_min == UINT32_MAX`) is uniform across all 32 lanes. Lane 0 returns the
+// warp total.
+// ============================================================
+__device__ __forceinline__ uint64_t warp_reduce_add_u64(uint64_t v) {
+    #pragma unroll
+    for (int o = 16; o > 0; o >>= 1)
+        v += __shfl_down_sync(0xffffffffu, v, o);
+    return v;
+}
+
+// ============================================================
 // Kernel 1: Init — create depth=2 partial matches
 // One thread per (edge_idx * num_q_edges * 2 + qe_idx * 2 + dir)
 // ============================================================
@@ -101,7 +136,7 @@ __global__ void bfs_init_kernel(
     if (elabel != found_el) return;
 
     // Create partial match
-    uint32_t slot = atomicAdd(out_count, 1);
+    uint32_t slot = warp_agg_inc(out_count);  // OPT(B): warp-aggregated atomic
     if (slot >= max_out) return;  // buffer full
 
     uint32_t stride = Q + 1;
@@ -133,18 +168,29 @@ __global__ void bfs_expand_kernel(
     uint32_t Q,
     uint32_t max_out
 ) {
-    uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= in_count) return;
+    // OPT(C): warp-per-partial-match. 32 lanes cooperatively sweep the candidate
+    // list of ONE partial match. Profile showed 2.35/32 active threads with the
+    // old 1-thread-per-pm scheme — most lanes idled while a few chewed through
+    // high-degree candidate lists. Both early-returns below are warp-uniform
+    // (warp_id and u_min are identical across the warp), so the warp stays
+    // converged into the strided loop where __ballot_sync is safe.
+    // 32 lanes cooperatively sweep one partial match's candidate list.
+    // gtid MUST be 64-bit: at >2^27 partial matches, cur_count*32 exceeds
+    // UINT32_MAX and a 32-bit gtid wraps, aliasing warp_ids → double counts.
+    uint64_t gtid = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    uint32_t warp_id = (uint32_t)(gtid >> 5);
+    uint32_t lane = (uint32_t)(gtid & 31u);
+    if (warp_id >= in_count) return;
 
     uint32_t stride = Q + 1;
-    const uint32_t* pm = in_buf + idx * stride;
+    const uint32_t* pm = in_buf + (size_t)warp_id * stride;
     uint32_t order_idx = pm[0];
     const uint32_t* m = pm + 1;  // m[0..Q-1]
 
     const uint32_t* order = all_orders + order_idx * Q;
     uint32_t u = order[depth];
 
-    // Find u_min: matched query neighbor of u with smallest degree
+    // Find u_min: matched query neighbor of u with smallest degree (warp-uniform)
     uint32_t u_min = UINT32_MAX;
     uint32_t u_min_label = 0;
     uint32_t u_min_deg = UINT32_MAX;
@@ -169,42 +215,64 @@ __global__ void bfs_expand_kernel(
     uint32_t nbr_start = csr_offsets[m[u_min]];
     uint32_t nbr_count = (bfs_use_padded && degrees) ? degrees[m[u_min]] : (csr_offsets[m[u_min] + 1] - nbr_start);
 
-    for (uint32_t i = 0; i < nbr_count; i++) {
-        uint32_t v = csr_neighbors[nbr_start + i];
+    // Strided sweep: every lane participates in each round (i may be out of range,
+    // but the lane still reaches __ballot_sync so the warp never deadlocks).
+    for (uint32_t base = 0; base < nbr_count; base += 32) {
+        uint32_t i = base + lane;
+        bool emit = false;
+        uint32_t v = 0;
 
-        // 1. Label check
-        if (vlabels[v] != bfs_q_vlabels[u]) continue;
-        if (csr_elabels[nbr_start + i] != u_min_label) continue;
-
-        // 2. Joinability
-        bool joinable = true;
-        for (uint32_t j = qs; j < qe; j++) {
-            uint32_t u_other = bfs_q_neighbors[j];
-            if (m[u_other] == UINT32_MAX || u_other == u_min) continue;
-            uint32_t s = csr_offsets[m[u_other]];
-            uint32_t nc = (bfs_use_padded && degrees) ? degrees[m[u_other]] : (csr_offsets[m[u_other] + 1] - s);
-            int pos = bfs_bsearch(csr_neighbors + s, nc, v);
-            if (pos < 0 || csr_elabels[s + pos] != bfs_q_elabels[j]) {
-                joinable = false; break;
+        if (i < nbr_count) {
+            v = csr_neighbors[nbr_start + i];
+            // 1. Label check
+            if (vlabels[v] == bfs_q_vlabels[u] &&
+                csr_elabels[nbr_start + i] == u_min_label) {
+                // 2. Joinability
+                bool joinable = true;
+                for (uint32_t j = qs; j < qe; j++) {
+                    uint32_t u_other = bfs_q_neighbors[j];
+                    if (m[u_other] == UINT32_MAX || u_other == u_min) continue;
+                    uint32_t s = csr_offsets[m[u_other]];
+                    uint32_t nc = (bfs_use_padded && degrees) ? degrees[m[u_other]] : (csr_offsets[m[u_other] + 1] - s);
+                    int pos = bfs_bsearch(csr_neighbors + s, nc, v);
+                    if (pos < 0 || csr_elabels[s + pos] != bfs_q_elabels[j]) {
+                        joinable = false; break;
+                    }
+                }
+                // 3. Visited check
+                if (joinable) {
+                    bool visited = false;
+                    for (uint32_t d = 0; d < Q; d++) {
+                        if (m[d] == v) { visited = true; break; }
+                    }
+                    emit = !visited;
+                }
             }
         }
-        if (!joinable) continue;
 
-        // 3. Visited check
-        bool visited = false;
-        for (uint32_t d = 0; d < Q; d++) {
-            if (m[d] == v) { visited = true; break; }
+        // 4. Warp-cooperative write via __syncwarp-fenced ballot.
+        // __syncwarp() forces all 32 lanes to reconverge after the divergent
+        // joinability/visited checks above, so the full-mask ballot/shfl below
+        // see a consistent active set (required on Volta+ independent scheduling).
+        __syncwarp();
+        uint32_t emit_mask = __ballot_sync(0xffffffffu, emit);
+        uint32_t cnt = __popc(emit_mask);
+        if (cnt) {
+            uint32_t base_slot = 0;
+            uint32_t leader = __ffs(emit_mask) - 1;
+            if (lane == leader) base_slot = atomicAdd(out_count, cnt);
+            base_slot = __shfl_sync(0xffffffffu, base_slot, leader);
+            if (emit) {
+                uint32_t rank = __popc(emit_mask & ((1u << lane) - 1u));
+                uint32_t slot = base_slot + rank;
+                if (slot < max_out) {  // buffer full — skip write but keep counting
+                    uint32_t* out = out_buf + (size_t)slot * stride;
+                    out[0] = order_idx;
+                    for (uint32_t j = 0; j < Q; j++) out[1 + j] = m[j];
+                    out[1 + u] = v;
+                }
+            }
         }
-        if (visited) continue;
-
-        // 4. Write new partial match
-        uint32_t slot = atomicAdd(out_count, 1);
-        if (slot >= max_out) continue;  // buffer full — skip write but keep counting
-
-        uint32_t* out = out_buf + slot * stride;
-        out[0] = order_idx;
-        for (uint32_t j = 0; j < Q; j++) out[1 + j] = m[j];
-        out[1 + u] = v;
     }
 }
 
@@ -224,11 +292,17 @@ __global__ void bfs_count_kernel(
     uint32_t depth,
     uint32_t Q
 ) {
-    uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= in_count) return;
+    // OPT(C): warp-per-partial-match (see expand kernel). 32 lanes sweep one
+    // partial match's candidate list; each lane accumulates locally, then a
+    // single warp reduction + one atomicAdd folds the warp's total in.
+    // gtid is 64-bit to avoid wrap at >2^27 partial matches (cur_count*32 > 2^32).
+    uint64_t gtid = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    uint32_t warp_id = (uint32_t)(gtid >> 5);
+    uint32_t lane = (uint32_t)(gtid & 31u);
+    if (warp_id >= in_count) return;
 
     uint32_t stride = Q + 1;
-    const uint32_t* pm = in_buf + idx * stride;
+    const uint32_t* pm = in_buf + (size_t)warp_id * stride;
     uint32_t order_idx = pm[0];
     const uint32_t* m = pm + 1;
 
@@ -260,7 +334,7 @@ __global__ void bfs_count_kernel(
     uint32_t nbr_count = (bfs_use_padded && degrees) ? degrees[m[u_min]] : (csr_offsets[m[u_min] + 1] - nbr_start);
     uint64_t local_count = 0;
 
-    for (uint32_t i = 0; i < nbr_count; i++) {
+    for (uint32_t i = lane; i < nbr_count; i += 32) {
         uint32_t v = csr_neighbors[nbr_start + i];
 
         if (vlabels[v] != bfs_q_vlabels[u]) continue;
@@ -288,7 +362,9 @@ __global__ void bfs_count_kernel(
         local_count++;
     }
 
-    if (local_count > 0) {
+    // Warp reduction: lane 0 issues a single atomicAdd for the whole warp.
+    local_count = warp_reduce_add_u64(local_count);
+    if (lane == 0 && local_count > 0) {
         atomicAdd(reinterpret_cast<unsigned long long*>(result_count),
                   static_cast<unsigned long long>(local_count));
     }
@@ -347,7 +423,7 @@ __global__ void bfs_init_versioned_kernel(
     if (vlabels[mv2] != bfs_q_vlabels[u2]) return;
     if (elabel != found_el) return;
 
-    uint32_t slot = atomicAdd(out_count, 1);
+    uint32_t slot = warp_agg_inc(out_count);  // OPT(B): warp-aggregated atomic
     if (slot >= max_out) return;  // count but skip write
 
     uint32_t stride = Q + 2;
@@ -374,11 +450,14 @@ __global__ void bfs_expand_versioned_kernel(
     uint32_t Q,
     uint32_t max_out
 ) {
-    uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= in_count) return;
+    // OPT(C): warp-per-partial-match (see non-versioned expand kernel).
+    uint64_t gtid = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;  // 64-bit: avoid wrap >2^27 pm
+    uint32_t warp_id = (uint32_t)(gtid >> 5);
+    uint32_t lane = (uint32_t)(gtid & 31u);
+    if (warp_id >= in_count) return;
 
     uint32_t stride = Q + 2;
-    const uint32_t* pm = in_buf + idx * stride;
+    const uint32_t* pm = in_buf + (size_t)warp_id * stride;
     uint32_t order_idx = pm[0];
     uint32_t max_ts = pm[1];
     const uint32_t* m = pm + 2;
@@ -386,7 +465,7 @@ __global__ void bfs_expand_versioned_kernel(
     const uint32_t* order = all_orders + order_idx * Q;
     uint32_t u = order[depth];
 
-    // Find u_min
+    // Find u_min (warp-uniform)
     uint32_t u_min = UINT32_MAX, u_min_label = 0, u_min_deg = UINT32_MAX;
     uint32_t qs = bfs_q_offsets[u];
     uint32_t qe = bfs_q_offsets[u + 1];
@@ -394,15 +473,15 @@ __global__ void bfs_expand_versioned_kernel(
     for (uint32_t j = qs; j < qe; j++) {
         uint32_t u_other = bfs_q_neighbors[j];
         if (m[u_other] == UINT32_MAX) continue;
-        uint32_t off = csr_offsets[m[u_other]];
-        uint32_t full_deg = csr_offsets[m[u_other] + 1] - off;
-        // Count only visible edges for u_min selection
-        uint32_t vis_deg = 0;
-        for (uint32_t k = 0; k < full_deg; k++) {
-            if (csr_timestamps[off + k] <= max_ts) vis_deg++;
-        }
-        if (vis_deg < u_min_deg) {
-            u_min_deg = vis_deg;
+        // OPT(A): use O(1) physical degree as a proxy for visible degree.
+        // u_min is only the search pivot (smallest candidate set); the per-edge
+        // timestamp filter below still runs on every neighbour, so an approximate
+        // pivot cannot change the match count — only the work done to find it.
+        // This removes an O(sum of degrees) scan per partial match (the hot spot
+        // that made versioned ~80% slower than plain BFS on LiveJournal).
+        uint32_t deg = csr_offsets[m[u_other] + 1] - csr_offsets[m[u_other]];
+        if (deg < u_min_deg) {
+            u_min_deg = deg;
             u_min = u_other;
             u_min_label = bfs_q_elabels[j];
         }
@@ -412,47 +491,58 @@ __global__ void bfs_expand_versioned_kernel(
     uint32_t nbr_start = csr_offsets[m[u_min]];
     uint32_t nbr_count = csr_offsets[m[u_min] + 1] - nbr_start;
 
-    for (uint32_t i = 0; i < nbr_count; i++) {
-        // Version filter
-        if (csr_timestamps[nbr_start + i] > max_ts) continue;
+    for (uint32_t base = 0; base < nbr_count; base += 32) {
+        uint32_t i = base + lane;
+        bool emit = false;
+        uint32_t v = 0;
 
-        uint32_t v = csr_neighbors[nbr_start + i];
-
-        // Label check
-        if (vlabels[v] != bfs_q_vlabels[u]) continue;
-        if (csr_elabels[nbr_start + i] != u_min_label) continue;
-
-        // Joinability (version-aware)
-        bool joinable = true;
-        for (uint32_t j = qs; j < qe; j++) {
-            uint32_t u_other = bfs_q_neighbors[j];
-            if (m[u_other] == UINT32_MAX || u_other == u_min) continue;
-            uint32_t s = csr_offsets[m[u_other]];
-            uint32_t nc = csr_offsets[m[u_other] + 1] - s;
-            int pos = bfs_bsearch(csr_neighbors + s, nc, v);
-            if (pos < 0 || csr_elabels[s + pos] != bfs_q_elabels[j] ||
-                csr_timestamps[s + pos] > max_ts) {
-                joinable = false; break;
+        if (i < nbr_count && csr_timestamps[nbr_start + i] <= max_ts) {  // version filter
+            v = csr_neighbors[nbr_start + i];
+            // Label check
+            if (vlabels[v] == bfs_q_vlabels[u] &&
+                csr_elabels[nbr_start + i] == u_min_label) {
+                // Joinability (version-aware)
+                bool joinable = true;
+                for (uint32_t j = qs; j < qe; j++) {
+                    uint32_t u_other = bfs_q_neighbors[j];
+                    if (m[u_other] == UINT32_MAX || u_other == u_min) continue;
+                    uint32_t s = csr_offsets[m[u_other]];
+                    uint32_t nc = csr_offsets[m[u_other] + 1] - s;
+                    int pos = bfs_bsearch(csr_neighbors + s, nc, v);
+                    if (pos < 0 || csr_elabels[s + pos] != bfs_q_elabels[j] ||
+                        csr_timestamps[s + pos] > max_ts) {
+                        joinable = false; break;
+                    }
+                }
+                if (joinable) {
+                    bool visited = false;
+                    for (uint32_t d = 0; d < Q; d++) {
+                        if (m[d] == v) { visited = true; break; }
+                    }
+                    emit = !visited;
+                }
             }
         }
-        if (!joinable) continue;
 
-        // Visited check
-        bool visited = false;
-        for (uint32_t d = 0; d < Q; d++) {
-            if (m[d] == v) { visited = true; break; }
+        // Warp-cooperative write
+        uint32_t emit_mask = __ballot_sync(0xffffffffu, emit);
+        uint32_t cnt = __popc(emit_mask);
+        if (cnt) {
+            uint32_t base_slot = 0;
+            if (lane == 0) base_slot = atomicAdd(out_count, cnt);
+            base_slot = __shfl_sync(0xffffffffu, base_slot, 0);
+            if (emit) {
+                uint32_t rank = __popc(emit_mask & ((1u << lane) - 1u));
+                uint32_t slot = base_slot + rank;
+                if (slot < max_out) {
+                    uint32_t* out = out_buf + slot * stride;
+                    out[0] = order_idx;
+                    out[1] = max_ts;
+                    for (uint32_t j = 0; j < Q; j++) out[2 + j] = m[j];
+                    out[2 + u] = v;
+                }
+            }
         }
-        if (visited) continue;
-
-        // Write new partial match
-        uint32_t slot = atomicAdd(out_count, 1);
-        if (slot >= max_out) continue;  // buffer full — skip write but keep counting
-
-        uint32_t* out = out_buf + slot * stride;
-        out[0] = order_idx;
-        out[1] = max_ts;
-        for (uint32_t j = 0; j < Q; j++) out[2 + j] = m[j];
-        out[2 + u] = v;
     }
 }
 
@@ -469,11 +559,14 @@ __global__ void bfs_count_versioned_kernel(
     uint32_t depth,
     uint32_t Q
 ) {
-    uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= in_count) return;
+    // OPT(C): warp-per-partial-match (see non-versioned count kernel).
+    uint64_t gtid = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;  // 64-bit: avoid wrap >2^27 pm
+    uint32_t warp_id = (uint32_t)(gtid >> 5);
+    uint32_t lane = (uint32_t)(gtid & 31u);
+    if (warp_id >= in_count) return;
 
     uint32_t stride = Q + 2;
-    const uint32_t* pm = in_buf + idx * stride;
+    const uint32_t* pm = in_buf + (size_t)warp_id * stride;
     uint32_t order_idx = pm[0];
     uint32_t max_ts = pm[1];
     const uint32_t* m = pm + 2;
@@ -488,14 +581,12 @@ __global__ void bfs_count_versioned_kernel(
     for (uint32_t j = qs; j < qe; j++) {
         uint32_t u_other = bfs_q_neighbors[j];
         if (m[u_other] == UINT32_MAX) continue;
-        uint32_t off = csr_offsets[m[u_other]];
-        uint32_t full_deg = csr_offsets[m[u_other] + 1] - off;
-        uint32_t vis_deg = 0;
-        for (uint32_t k = 0; k < full_deg; k++) {
-            if (csr_timestamps[off + k] <= max_ts) vis_deg++;
-        }
-        if (vis_deg < u_min_deg) {
-            u_min_deg = vis_deg;
+        // OPT(A): O(1) physical degree proxy for visible degree (see expand kernel).
+        // Pivot choice does not affect correctness; the timestamp filter below is
+        // still applied per neighbour.
+        uint32_t deg = csr_offsets[m[u_other] + 1] - csr_offsets[m[u_other]];
+        if (deg < u_min_deg) {
+            u_min_deg = deg;
             u_min = u_other;
             u_min_label = bfs_q_elabels[j];
         }
@@ -506,7 +597,7 @@ __global__ void bfs_count_versioned_kernel(
     uint32_t nbr_count = csr_offsets[m[u_min] + 1] - nbr_start;
     uint64_t local_count = 0;
 
-    for (uint32_t i = 0; i < nbr_count; i++) {
+    for (uint32_t i = lane; i < nbr_count; i += 32) {
         if (csr_timestamps[nbr_start + i] > max_ts) continue;
 
         uint32_t v = csr_neighbors[nbr_start + i];
@@ -536,7 +627,8 @@ __global__ void bfs_count_versioned_kernel(
         local_count++;
     }
 
-    if (local_count > 0) {
+    local_count = warp_reduce_add_u64(local_count);
+    if (lane == 0 && local_count > 0) {
         atomicAdd(reinterpret_cast<unsigned long long*>(result_count),
                   static_cast<unsigned long long>(local_count));
     }
@@ -841,7 +933,8 @@ void GPUBFSSearch::BFSFromDepth(uint32_t* in_buf, uint32_t in_count,
         bool is_last = (depth == Q - 1);
 
         if (is_last) {
-            grid = (cur_count + block - 1) / block;
+            // OPT(C): one warp per partial match → 32 threads each.
+            grid = (uint32_t)(((uint64_t)cur_count * 32 + block - 1) / block);
             if (versioned) {
                 bfs_count_versioned_kernel<<<grid, block>>>(
                     d_csr_offsets_, d_csr_neighbors_, d_csr_elabels_, d_csr_timestamps_,
@@ -867,7 +960,7 @@ void GPUBFSSearch::BFSFromDepth(uint32_t* in_buf, uint32_t in_count,
                 uint32_t out_count;
                 do {
                     CUDA_CHECK(cudaMemcpy(d_count_, &zero32, sizeof(uint32_t), cudaMemcpyHostToDevice));
-                    grid = (chunk + block - 1) / block;
+                    grid = (uint32_t)(((uint64_t)chunk * 32 + block - 1) / block);  // OPT(C): warp per pm
                     if (versioned) {
                         bfs_expand_versioned_kernel<<<grid, block>>>(
                             d_csr_offsets_, d_csr_neighbors_, d_csr_elabels_, d_csr_timestamps_,
@@ -1139,7 +1232,7 @@ uint64_t GPUBFSSearch::SearchSingleEdgeBFS(
         bool is_last = (depth == Q - 1);
 
         if (is_last) {
-            grid = (cur_count + block - 1) / block;
+            grid = (uint32_t)(((uint64_t)cur_count * 32 + block - 1) / block);  // OPT(C): warp per pm
             bfs_count_kernel<<<grid, block>>>(
                 d_csr_offsets_, d_csr_neighbors_, d_csr_elabels_, d_vlabels_,
                 d_degrees_, d_all_orders_, cur_buf, cur_count, d_result_, depth, Q
@@ -1147,7 +1240,7 @@ uint64_t GPUBFSSearch::SearchSingleEdgeBFS(
             CUDA_CHECK(cudaGetLastError());
         } else {
             CUDA_CHECK(cudaMemcpy(d_count_, &zero32, sizeof(uint32_t), cudaMemcpyHostToDevice));
-            grid = (cur_count + block - 1) / block;
+            grid = (uint32_t)(((uint64_t)cur_count * 32 + block - 1) / block);  // OPT(C): warp per pm
             bfs_expand_kernel<<<grid, block>>>(
                 d_csr_offsets_, d_csr_neighbors_, d_csr_elabels_, d_vlabels_,
                 d_degrees_, d_all_orders_,
