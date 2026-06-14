@@ -101,7 +101,7 @@ private:
     static constexpr size_t MAX_BUF_MATCHES = 400'000'000;
 
     // Counters
-    uint32_t* d_count_ = nullptr;
+    unsigned long long* d_count_ = nullptr;  // logical emitter count (64-bit: dense layers exceed 2^32)
     uint64_t* d_result_ = nullptr;
 
     // Edge input buffers
