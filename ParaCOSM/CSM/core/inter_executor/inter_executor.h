@@ -7,6 +7,7 @@
 #include "graph_storage/graph.h"
 #include "core/gpu/gpu_classifier.h"
 #include "core/gpu/gpu_search.h"
+#include "core/gpu/gpu_bfs_search.h"
 
 // Forward declaration
 struct InsertUnit;
@@ -29,6 +30,10 @@ private:
     // GPU search engine for inter-update batch enumeration
     GPUSearchEngine gpu_search_engine_;
     bool gpu_search_ready_ = false;
+
+    // GPU BFS search engine for BFS-level parallel inter-update
+    GPUBFSSearch gpu_bfs_search_;
+    bool gpu_bfs_ready_ = false;
 
     // Configuration constants
     static constexpr size_t DEFAULT_WINDOW_SIZE = 16;
@@ -277,6 +282,77 @@ public:
     );
 
     /**
+     * @brief GPU BFS-level parallel inter-update batch processing.
+     *
+     * Same setup as GPU_AllAtOnce (classify + add edges + build CSR once),
+     * but match enumeration uses BFS-level expansion instead of per-thread DFS.
+     * Each BFS level is a GPU kernel launch: all partial matches at depth d
+     * expand to depth d+1 in parallel. At the last level, matches are counted.
+     */
+    void BatchUpdates_GPU_BFS(
+        size_t& num_v_updates,
+        size_t& num_e_updates,
+        size_t& unsafe_updates,
+        size_t& count,
+        size_t& positive_num_results_last,
+        size_t& negative_num_results_last,
+        std::atomic_bool& reach_time_limit
+    );
+
+    /**
+     * @brief GPU BFS inner-update: padded CSR on GPU, process updates one by one.
+     *
+     * Builds padded CSR once from initial data graph. For each update:
+     * - Safe edges: add to graph + incremental GPU CSR update
+     * - Unsafe edges: add to graph + incremental GPU CSR update + GPU BFS search
+     * Gives same semantics as `-m single` but search runs on GPU.
+     */
+    void BatchUpdates_GPU_BFS_Single(
+        size_t& num_v_updates,
+        size_t& num_e_updates,
+        size_t& unsafe_updates,
+        size_t& count,
+        size_t& positive_num_results_last,
+        size_t& negative_num_results_last,
+        std::atomic_bool& reach_time_limit
+    );
+
+    /**
+     * @brief Versioned inter-update batch: inner-update semantics + full parallelism.
+     *
+     * Adds ALL edges with timestamps, then searches unsafe edges in parallel.
+     * Each search only sees edges with timestamp <= its own position.
+     * This gives exact same results as sequential inner-update while
+     * enabling full inter-update parallelism.
+     */
+    void BatchUpdates_Versioned(
+        size_t& num_v_updates,
+        size_t& num_e_updates,
+        size_t& unsafe_updates,
+        size_t& count,
+        size_t& positive_num_results_last,
+        size_t& negative_num_results_last,
+        std::atomic_bool& reach_time_limit,
+        size_t num_threads
+    );
+
+    /**
+     * @brief GPU BFS versioned: inner-update semantics on GPU with batch parallelism.
+     *
+     * Builds CSR with per-edge timestamps once, then GPU BFS searches all unsafe
+     * edges in parallel. Each search only sees edges with timestamp <= its own.
+     */
+    void BatchUpdates_GPU_BFS_Versioned(
+        size_t& num_v_updates,
+        size_t& num_e_updates,
+        size_t& unsafe_updates,
+        size_t& count,
+        size_t& positive_num_results_last,
+        size_t& negative_num_results_last,
+        std::atomic_bool& reach_time_limit
+    );
+
+    /**
      * @brief GPU-accelerated batch processing with large sliding window.
      *
      * Uses CUDA to classify edges in bulk on the GPU, then processes the
@@ -298,6 +374,27 @@ public:
      * @brief Initialize GPU classifier from current query/data graph state.
      */
     void InitGPUClassifier();
+
+    /**
+     * @brief Pipelined batch processing with classify caching + prefetch.
+     *
+     * Combines three optimizations over BatchUpdates_Persistent:
+     * 1. Classify cache: results from previous windows are reused, not recomputed.
+     * 2. Pipeline prefetch: while the main thread processes an unsafe update
+     *    (AddEdge/FindMatches), the classify thread pool prefetches the next window.
+     * 3. Adaptive window: window size doubles on consecutive safe windows,
+     *    halves on encountering an unsafe update (AIMD style).
+     */
+    void BatchUpdates_Pipelined(
+        size_t& num_v_updates,
+        size_t& num_e_updates,
+        size_t& unsafe_updates,
+        size_t& count,
+        size_t& positive_num_results_last,
+        size_t& negative_num_results_last,
+        std::atomic_bool& reach_time_limit,
+        size_t num_threads = 8
+    );
 
     /**
      * DegreePruning

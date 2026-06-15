@@ -4,6 +4,7 @@
 #include <unordered_set>
 #include <vector>
 #include <cstring> // memcpy
+#include <cstdlib> // getenv, strtoul
 #include <stack>
 
 #include <thread>
@@ -103,7 +104,65 @@ void Parallel_TurboFlux::Preprocessing()
     BuildDCS();
     end_time = omp_get_wtime();  // end
     GenerateMatchingOrder();
+    BuildGPUMatchingOrders();
     std::cout << "Time taken to build DCS: " << end_time - start_time << " seconds." << std::endl; 
+}
+
+
+/**
+ * @brief Generates BFS-style matching orders compatible with the GPU pipeline.
+ *
+ * Mirrors Parallel_Graphflow::GenerateMatchingOrder. Produces query_.NumEdges()
+ * orders, one per undirected query edge. Each order starts with the two endpoints
+ * of the edge, then BFS-extends by repeatedly picking the unvisited query vertex
+ * with maximum connectivity to the already-ordered set (degree as tie-breaker).
+ *
+ * Used only by GetMatchingOrders() (consumed by GPU BFS-versioned kernel);
+ * does NOT replace TF's internal tree-based plan (treeNode_).
+ */
+void Parallel_TurboFlux::BuildGPUMatchingOrders()
+{
+    const uint Q = query_.NumVertices();
+    const uint num_q_edges = query_.NumEdges();
+    gpu_orders_.assign(num_q_edges, std::vector<uint>(Q, NOT_EXIST));
+
+    // Enumerate undirected query edges in canonical order: (u, v) with u < v.
+    std::vector<std::pair<uint, uint>> q_edges;
+    q_edges.reserve(num_q_edges);
+    for (uint u = 0; u < Q; u++) {
+        const auto& nbrs = query_.GetNeighbors(u);
+        for (uint v : nbrs) if (u < v) q_edges.emplace_back(u, v);
+    }
+
+    for (uint i = 0; i < q_edges.size(); i++) {
+        std::vector<bool> visited(Q, false);
+        gpu_orders_[i][0] = q_edges[i].first;
+        gpu_orders_[i][1] = q_edges[i].second;
+        visited[q_edges[i].first] = true;
+        visited[q_edges[i].second] = true;
+
+        for (uint j = 2; j < Q; j++) {
+            uint max_adjacent = 0;
+            uint max_adjacent_u = NOT_EXIST;
+            for (uint k = 0; k < Q; k++) {
+                if (visited[k]) continue;
+                uint cur_adjacent = 0;
+                const auto& q_nbrs = query_.GetNeighbors(k);
+                for (uint other : q_nbrs) if (visited[other]) cur_adjacent++;
+                if (!cur_adjacent) continue;
+                if (max_adjacent_u == NOT_EXIST ||
+                    cur_adjacent > max_adjacent ||
+                    (cur_adjacent == max_adjacent &&
+                     query_.GetDegree(k) > query_.GetDegree(max_adjacent_u))) {
+                    max_adjacent = cur_adjacent;
+                    max_adjacent_u = k;
+                }
+            }
+            if (max_adjacent_u == NOT_EXIST) break;
+            gpu_orders_[i][j] = max_adjacent_u;
+            visited[max_adjacent_u] = true;
+        }
+    }
 }
 
 
@@ -1203,6 +1262,7 @@ inline void Parallel_TurboFlux::Parallel_FindMatches(uint order_index, uint dept
         }
     }
 
+    #pragma omp parallel num_threads(NUMT)
     {
         size_t thread_id = omp_get_thread_num();
 
@@ -1396,6 +1456,374 @@ void Parallel_TurboFlux::FindMatches_local(uint order_index, uint depth, std::ve
     }
 }
 
+// Versioned variant: bypasses DCS, directly iterates data graph neighbors with timestamp filter
+void Parallel_TurboFlux::FindMatches_versioned(uint order_index, uint depth, std::vector<uint>& m,
+    size_t &num_results, size_t thread_id, uint max_ts)
+{
+    uint u = order_vs_[order_index][depth];
+    uint u_min = backward_vs_[order_index][depth];
+
+    // Get the edge label between u_min and u in the query
+    auto q_elabel = std::get<2>(query_.GetEdgeLabel(u_min, u));
+
+    // Iterate data graph neighbors of m[u_min] directly (bypass DCS)
+    const auto& nbrs = data_.GetNeighbors(m[u_min]);
+    const auto& nbr_labels = data_.GetNeighborLabels(m[u_min]);
+    const auto& nbr_ts = data_.GetEdgeTimestamps(m[u_min]);
+
+    for (uint idx = 0; idx < nbrs.size(); idx++)
+    {
+        // Version filter
+        if (nbr_ts[idx] > max_ts) continue;
+
+        uint v = nbrs[idx];
+
+        // 1. label check
+        if (data_.GetVertexLabel(v) != query_.GetVertexLabel(u)) continue;
+        if (nbr_labels[idx] != q_elabel) continue;
+
+        // 2. check if joinable (version-aware)
+        bool joinable = true;
+        for (uint i = 0; i < join_check_vs_[order_index][u].size(); i++)
+        {
+            const auto& u_backward = join_check_vs_[order_index][u][i];
+            const auto& u_backward_elabel = join_check_labels_[order_index][u][i];
+
+            // Check edge exists and label matches
+            auto d_elabel = data_.GetEdgeLabel(m[u_backward], v);
+            if (std::get<2>(d_elabel) != u_backward_elabel)
+            {
+                joinable = false;
+                break;
+            }
+            // Check timestamp
+            if (data_.GetEdgeTimestamp(m[u_backward], v) > max_ts)
+            {
+                joinable = false;
+                break;
+            }
+        }
+        if (!joinable) continue;
+
+        // 3. check if visited
+        if (!homomorphism_ && local_vec_visited_local[thread_id][v]) continue;
+
+        // 4. add a vertex mapping
+        m[u] = v;
+        local_vec_visited_local[thread_id][v] = true;
+
+        if (depth == query_.NumVertices() - 1)
+        {
+            num_results++;
+        }
+        else
+        {
+            FindMatches_versioned(order_index, depth + 1, m, num_results, thread_id, max_ts);
+        }
+
+        local_vec_visited_local[thread_id][v] = false;
+        m[u] = UNMATCHED;
+
+        if (num_results >= max_num_results_ || reach_time_limit) return;
+    }
+}
+
+size_t Parallel_TurboFlux::EnumerateNewEdgeVersioned(uint v1, uint v2, uint label,
+                                                      size_t /*thread_id*/, uint max_timestamp)
+{
+    if (max_num_results_ == 0) return 0;
+
+    // Acquire slot for the (u1,u2) loop's base state. Slot starts clean
+    // (m all-UNMATCHED, visited all-false). We restore that invariant before release.
+    size_t slot = AcquireSlot();
+    auto& m = slot_m_[slot];
+    auto& visited = slot_visited_[slot];
+
+    size_t num_results = 0;
+
+    for (uint u1 = 0; u1 < query_.NumVertices(); u1++)
+    if (data_.GetVertexLabel(v1) == query_.GetVertexLabel(u1))
+    {
+    for (uint u2 = 0; u2 < query_.NumVertices(); u2++)
+    if (data_.GetVertexLabel(v2) == query_.GetVertexLabel(u2))
+    {
+        if (std::get<2>(query_.GetEdgeLabel(u1, u2)) != label) continue;
+
+        bool reversed = false;
+        if (std::find(treeNode_[u1].backwards_.begin(), treeNode_[u1].backwards_.end(), u2) != treeNode_[u1].backwards_.end())
+        {
+            std::swap(u1, u2);
+            std::swap(v1, v2);
+            reversed = true;
+        }
+
+        auto run_search = [&](uint order_index) {
+            // Decide hot vs serial based on first-layer fanout = #neighbors of m[u_min]
+            uint u_min = backward_vs_[order_index][2];
+            uint vmin = m[u_min];
+            const auto& nbrs = data_.GetNeighbors(vmin);
+            const size_t n_nbrs = nbrs.size();
+
+            // Only fan out when (a) caller is inside an OMP parallel region (so
+            // tasks can actually be picked up by other threads), and (b) the
+            // first layer is large enough to amortize task overhead.
+            if (n_nbrs < hot_split_threshold_ || !omp_in_parallel()) {
+                FindMatches_versioned_v2(order_index, 2, m, visited, num_results, max_timestamp);
+                return;
+            }
+
+            // Hot fan-out: each task takes a chunk of neighbor indices, gets
+            // its own slot, replicates the (u1,u2) base state, runs serial DFS
+            // on that chunk. Children scoped under taskgroup so we wait for all.
+            std::atomic<size_t> sub{0};
+            const uint cu1 = u1, cu2 = u2, cv1 = v1, cv2 = v2;
+            const size_t chunk = hot_chunk_size_;
+            #pragma omp taskgroup
+            {
+                for (size_t lo = 0; lo < n_nbrs; lo += chunk) {
+                    size_t hi = std::min(lo + chunk, n_nbrs);
+                    #pragma omp task firstprivate(lo, hi, order_index, cu1, cu2, cv1, cv2, max_timestamp) shared(sub)
+                    {
+                        if (!reach_time_limit && sub.load(std::memory_order_relaxed) < max_num_results_) {
+                            size_t s = AcquireSlot();
+                            auto& tm = slot_m_[s];
+                            auto& tv = slot_visited_[s];
+                            tm[cu1] = cv1; tm[cu2] = cv2;
+                            tv[cv1] = true; tv[cv2] = true;
+                            size_t r = 0;
+                            FindMatches_versioned_chunk(order_index, 2, tm, tv, r, max_timestamp, lo, hi);
+                            // Restore slot invariant before release.
+                            tm[cu1] = UNMATCHED; tm[cu2] = UNMATCHED;
+                            tv[cv1] = false; tv[cv2] = false;
+                            sub.fetch_add(r, std::memory_order_relaxed);
+                            ReleaseSlot(s);
+                        }
+                    }
+                }
+            }
+            num_results += sub.load();
+        };
+
+        // Case 1: tree edge (u1 -> u2 in DAG)
+        if (std::find(treeNode_[u2].backwards_.begin(), treeNode_[u2].backwards_.end(), u1) != treeNode_[u2].backwards_.end())
+        {
+            m[u1] = v1; m[u2] = v2;
+            visited[v1] = true; visited[v2] = true;
+
+            run_search(eidx_[u2][u1]);
+
+            visited[v1] = false; visited[v2] = false;
+            m[u1] = UNMATCHED; m[u2] = UNMATCHED;
+            if (num_results >= max_num_results_ || reach_time_limit) goto DONE_V;
+        }
+        // Case 2: non-tree edge
+        if (std::find(treeNode_[u1].backwards_.begin(), treeNode_[u1].backwards_.end(), u2) == treeNode_[u1].backwards_.end()
+            && std::find(treeNode_[u2].backwards_.begin(), treeNode_[u2].backwards_.end(), u1) == treeNode_[u2].backwards_.end())
+        {
+            m[u1] = v1; m[u2] = v2;
+            visited[v1] = true; visited[v2] = true;
+
+            run_search(eidx_[std::min(u1, u2)][std::max(u1, u2)]);
+
+            visited[v1] = false; visited[v2] = false;
+            m[u1] = UNMATCHED; m[u2] = UNMATCHED;
+            if (num_results >= max_num_results_ || reach_time_limit) goto DONE_V;
+        }
+        if (reversed) { std::swap(u1, u2); std::swap(v1, v2); }
+    }
+    }
+    DONE_V:
+    ReleaseSlot(slot);
+    return num_results;
+}
+
+// Helper: fused join check — single binary search on m[u_b]'s neighbor list
+// returning both edge label and timestamp. Avoids two separate binary searches
+// (GetEdgeLabel + GetEdgeTimestamp) per join target per neighbor.
+static inline bool VersionedJoinCheck(const Graph& data, uint u_b_data_v, uint v,
+                                       uint expected_elabel, uint max_ts)
+{
+    const auto& nbrs = data.GetNeighbors(u_b_data_v);
+    auto it = std::lower_bound(nbrs.begin(), nbrs.end(), v);
+    if (it == nbrs.end() || *it != v) return false;
+    size_t idx = static_cast<size_t>(it - nbrs.begin());
+    if (data.GetNeighborLabels(u_b_data_v)[idx] != expected_elabel) return false;
+    const auto& ts = data.GetEdgeTimestamps(u_b_data_v);
+    if (!ts.empty() && ts[idx] > max_ts) return false;
+    return true;
+}
+
+// Slot-pool variant of FindMatches_versioned: same semantics, uses passed-in
+// (m, visited) instead of thread-id-indexed local state. This is the kernel
+// invoked by both the serial (cold-edge) path and the hot-edge sub-tasks.
+void Parallel_TurboFlux::FindMatches_versioned_v2(uint order_index, uint depth,
+    std::vector<uint>& m, std::vector<bool>& visited,
+    size_t& num_results, uint max_ts)
+{
+    uint u = order_vs_[order_index][depth];
+    uint u_min = backward_vs_[order_index][depth];
+
+    auto q_elabel = std::get<2>(query_.GetEdgeLabel(u_min, u));
+    const uint q_vlabel_u = query_.GetVertexLabel(u);
+
+    const auto& nbrs = data_.GetNeighbors(m[u_min]);
+    const auto& nbr_labels = data_.GetNeighborLabels(m[u_min]);
+    const auto& nbr_ts = data_.GetEdgeTimestamps(m[u_min]);
+
+    const uint nv = query_.NumVertices();
+    const auto& jc_vs = join_check_vs_[order_index][u];
+    const auto& jc_labels = join_check_labels_[order_index][u];
+    const size_t jc_n = jc_vs.size();
+
+    // Idea #2: deep-layer fork. When we hit an inner depth with a large
+    // neighbor list while inside an OMP parallel region, fan out chunks as
+    // tasks (each gets its own slot, replays the prefix into it, runs the
+    // chunk kernel). Conditions:
+    //   * depth >= 3   (depth 2 is the hot-edge entry; avoid double fork)
+    //   * depth <= max_fork_depth_  (cap nesting to bound task explosion)
+    //   * n_nbrs >= deep_fork_threshold_  (amortize task overhead)
+    //   * inside OMP parallel region (otherwise tasks won't be picked up)
+    const size_t n_nbrs_total = nbrs.size();
+    if (depth >= 3 && depth <= max_fork_depth_
+        && n_nbrs_total >= deep_fork_threshold_
+        && omp_in_parallel()
+        && !reach_time_limit
+        && num_results < max_num_results_)
+    {
+        // Snapshot prefix: the (query_vertex, data_vertex) pairs already
+        // matched in this branch. Each child task replays this onto a fresh
+        // slot. Query size is bounded (<=32 in our datasets).
+        std::array<uint, 32> prefix_q{}, prefix_v{};
+        for (uint d = 0; d < depth; d++) {
+            uint qu = order_vs_[order_index][d];
+            prefix_q[d] = qu;
+            prefix_v[d] = m[qu];
+        }
+        const uint cap_depth = depth;
+        const uint cap_order = order_index;
+        const size_t chunk = deep_fork_chunk_;
+
+        std::atomic<size_t> sub{0};
+        #pragma omp taskgroup
+        {
+            for (size_t lo = 0; lo < n_nbrs_total; lo += chunk) {
+                size_t hi = std::min(lo + chunk, n_nbrs_total);
+                #pragma omp task firstprivate(lo, hi, cap_depth, cap_order, max_ts, prefix_q, prefix_v) shared(sub)
+                {
+                    if (!reach_time_limit && sub.load(std::memory_order_relaxed) < max_num_results_) {
+                        size_t s = AcquireSlot();
+                        auto& tm = slot_m_[s];
+                        auto& tv = slot_visited_[s];
+                        // Replay prefix into clean slot
+                        for (uint d = 0; d < cap_depth; d++) {
+                            tm[prefix_q[d]] = prefix_v[d];
+                            tv[prefix_v[d]] = true;
+                        }
+                        size_t r = 0;
+                        FindMatches_versioned_chunk(cap_order, cap_depth, tm, tv, r, max_ts, lo, hi);
+                        // Restore slot to clean state for the pool
+                        for (uint d = 0; d < cap_depth; d++) {
+                            tm[prefix_q[d]] = UNMATCHED;
+                            tv[prefix_v[d]] = false;
+                        }
+                        sub.fetch_add(r, std::memory_order_relaxed);
+                        ReleaseSlot(s);
+                    }
+                }
+            }
+        }
+        num_results += sub.load();
+        return;
+    }
+
+    for (uint idx = 0; idx < nbrs.size(); idx++)
+    {
+        if (nbr_ts[idx] > max_ts) continue;
+        if (nbr_labels[idx] != q_elabel) continue;
+        uint v = nbrs[idx];
+        if (data_.GetVertexLabel(v) != q_vlabel_u) continue;
+
+        bool joinable = true;
+        for (size_t i = 0; i < jc_n; i++) {
+            if (!VersionedJoinCheck(data_, m[jc_vs[i]], v, jc_labels[i], max_ts)) {
+                joinable = false; break;
+            }
+        }
+        if (!joinable) continue;
+
+        if (!homomorphism_ && visited[v]) continue;
+
+        m[u] = v;
+        visited[v] = true;
+
+        if (depth == nv - 1) {
+            num_results++;
+        } else {
+            FindMatches_versioned_v2(order_index, depth + 1, m, visited, num_results, max_ts);
+        }
+
+        visited[v] = false;
+        m[u] = UNMATCHED;
+
+        if (num_results >= max_num_results_ || reach_time_limit) return;
+    }
+}
+
+// Range-restricted variant: iterates only [lo, hi) of the entry-depth
+// neighbor list; recurses via _v2 for deeper levels (full iteration).
+void Parallel_TurboFlux::FindMatches_versioned_chunk(uint order_index, uint depth,
+    std::vector<uint>& m, std::vector<bool>& visited,
+    size_t& num_results, uint max_ts, size_t lo, size_t hi)
+{
+    uint u = order_vs_[order_index][depth];
+    uint u_min = backward_vs_[order_index][depth];
+
+    auto q_elabel = std::get<2>(query_.GetEdgeLabel(u_min, u));
+    const uint q_vlabel_u = query_.GetVertexLabel(u);
+
+    const auto& nbrs = data_.GetNeighbors(m[u_min]);
+    const auto& nbr_labels = data_.GetNeighborLabels(m[u_min]);
+    const auto& nbr_ts = data_.GetEdgeTimestamps(m[u_min]);
+
+    const uint nv = query_.NumVertices();
+    const auto& jc_vs = join_check_vs_[order_index][u];
+    const auto& jc_labels = join_check_labels_[order_index][u];
+    const size_t jc_n = jc_vs.size();
+
+    size_t end = std::min<size_t>(hi, nbrs.size());
+    for (size_t idx = lo; idx < end; idx++)
+    {
+        if (nbr_ts[idx] > max_ts) continue;
+        if (nbr_labels[idx] != q_elabel) continue;
+        uint v = nbrs[idx];
+        if (data_.GetVertexLabel(v) != q_vlabel_u) continue;
+
+        bool joinable = true;
+        for (size_t i = 0; i < jc_n; i++) {
+            if (!VersionedJoinCheck(data_, m[jc_vs[i]], v, jc_labels[i], max_ts)) {
+                joinable = false; break;
+            }
+        }
+        if (!joinable) continue;
+
+        if (!homomorphism_ && visited[v]) continue;
+
+        m[u] = v;
+        visited[v] = true;
+
+        if (depth == nv - 1) {
+            num_results++;
+        } else {
+            FindMatches_versioned_v2(order_index, depth + 1, m, visited, num_results, max_ts);
+        }
+
+        visited[v] = false;
+        m[u] = UNMATCHED;
+
+        if (num_results >= max_num_results_ || reach_time_limit) return;
+    }
+}
+
 
 /**
  * @brief Processes a single vertex in the parallel matching algorithm using job queue approach.
@@ -1580,6 +2008,7 @@ inline void Parallel_TurboFlux::Parallel_FindMatches_delete(uint order_index, ui
         }
     }
 
+    #pragma omp parallel num_threads(NUMT)
     {
         size_t thread_id = omp_get_thread_num();
 
@@ -2050,6 +2479,64 @@ void Parallel_TurboFlux::PrepareBatchEnumeration(size_t num_threads)
     if (local_vec_m.size() < num_threads) {
         local_vec_m.resize(num_threads, std::vector<uint>(query_.NumVertices(), UNMATCHED));
     }
+
+    // ---- Slot pool for hot-edge fan-out (size = 8 * num_threads to absorb
+    // nested parent+child holding across deep-layer forks). Each slot holds
+    // (m, visited).
+    // Invariant: visited is all-false and m is all-UNMATCHED when in free queue.
+    size_t desired_pool = std::max<size_t>(num_threads * 8, 16);
+    if (slot_pool_size_ < desired_pool) {
+        size_t old = slot_pool_size_;
+        slot_m_.resize(desired_pool, std::vector<uint>(query_.NumVertices(), UNMATCHED));
+        slot_visited_.resize(desired_pool, std::vector<bool>(nv, false));
+        for (size_t s = old; s < desired_pool; s++) {
+            free_slots_.push(s);
+        }
+        slot_pool_size_ = desired_pool;
+    }
+    // Ensure existing slots have correct sizes (data graph may have grown)
+    for (size_t s = 0; s < slot_pool_size_; s++) {
+        if (slot_visited_[s].size() < nv) slot_visited_[s].resize(nv, false);
+        if (slot_m_[s].size() < query_.NumVertices())
+            slot_m_[s].assign(query_.NumVertices(), UNMATCHED);
+    }
+    // Read tunables from environment once
+    if (const char* env = std::getenv("PARACOSM_HOT_SPLIT_THRESHOLD")) {
+        size_t v = std::strtoul(env, nullptr, 10);
+        if (v > 0) hot_split_threshold_ = v;
+    }
+    if (const char* env = std::getenv("PARACOSM_HOT_CHUNK_SIZE")) {
+        size_t v = std::strtoul(env, nullptr, 10);
+        if (v > 0) hot_chunk_size_ = v;
+    }
+    if (const char* env = std::getenv("PARACOSM_DEEP_FORK_THRESHOLD")) {
+        size_t v = std::strtoul(env, nullptr, 10);
+        if (v > 0) deep_fork_threshold_ = v;
+    }
+    if (const char* env = std::getenv("PARACOSM_DEEP_FORK_CHUNK")) {
+        size_t v = std::strtoul(env, nullptr, 10);
+        if (v > 0) deep_fork_chunk_ = v;
+    }
+    if (const char* env = std::getenv("PARACOSM_MAX_FORK_DEPTH")) {
+        size_t v = std::strtoul(env, nullptr, 10);
+        if (v > 0) max_fork_depth_ = static_cast<uint>(v);
+    }
+}
+
+size_t Parallel_TurboFlux::AcquireSlot()
+{
+    size_t s;
+    // Spin briefly; slot_pool_size_ is sized so a slot is normally available.
+    while (!free_slots_.try_pop(s)) {
+        // Yield to let other tasks finish; if oversubscribed, this prevents lockup.
+        #pragma omp taskyield
+    }
+    return s;
+}
+
+void Parallel_TurboFlux::ReleaseSlot(size_t s)
+{
+    free_slots_.push(s);
 }
 
 size_t Parallel_TurboFlux::EnumerateNewEdge(uint v1, uint v2, uint label, size_t thread_id)

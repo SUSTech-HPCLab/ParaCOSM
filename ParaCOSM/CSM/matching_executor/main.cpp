@@ -3,6 +3,8 @@
 #include <numeric>
 #include <string>
 #include <thread>
+#include <filesystem>
+#include <algorithm>
 
 #include <omp.h>
 
@@ -23,6 +25,8 @@
 #include "matching_executor/Parallel_SymBi/parallel_symbi.h"
 #include "matching_executor/Parallel_TurboFlux/parallel_turboflux.h"
 #include "matching_executor/Parallel_GraphFlow/parallel_graphflow.h"
+#include "matching_executor/Parallel_CaLiG/parallel_calig_class.h"
+#include "matching_executor/Parallel_NewSP/newsp_adapter.h"
 
 #include "core/inter_executor/inter_executor.h"
 
@@ -160,6 +164,26 @@ inline void RunUpdates_InterExecutor(Graph& data_graph, matching* mm, size_t& nu
         executor.BatchUpdates_GPU(
             num_v_updates, num_e_updates, unsafe_updates, count,
             positive_num_results_last, negative_num_results_last, reach_time_limit);
+    } else if (update_mode == "gpu_all") {
+        executor.BatchUpdates_GPU_AllAtOnce(
+            num_v_updates, num_e_updates, unsafe_updates, count,
+            positive_num_results_last, negative_num_results_last, reach_time_limit);
+    } else if (update_mode == "gpu_bfs") {
+        executor.BatchUpdates_GPU_BFS(
+            num_v_updates, num_e_updates, unsafe_updates, count,
+            positive_num_results_last, negative_num_results_last, reach_time_limit);
+    } else if (update_mode == "gpu_bfs_single") {
+        executor.BatchUpdates_GPU_BFS_Single(
+            num_v_updates, num_e_updates, unsafe_updates, count,
+            positive_num_results_last, negative_num_results_last, reach_time_limit);
+    } else if (update_mode == "versioned") {
+        executor.BatchUpdates_Versioned(
+            num_v_updates, num_e_updates, unsafe_updates, count,
+            positive_num_results_last, negative_num_results_last, reach_time_limit, num_threads);
+    } else if (update_mode == "gpu_bfs_versioned") {
+        executor.BatchUpdates_GPU_BFS_Versioned(
+            num_v_updates, num_e_updates, unsafe_updates, count,
+            positive_num_results_last, negative_num_results_last, reach_time_limit);
     } else {
         // default fallback
         executor.BatchUpdates3(
@@ -169,6 +193,66 @@ inline void RunUpdates_InterExecutor(Graph& data_graph, matching* mm, size_t& nu
 }
 
 
+// ---------------------------------------------------------------------------
+// Batch helper: run ONE query against a fresh copy of the (already-parsed) data
+// graph, applying the update stream, and print a compact one-line result.
+// Used by --query-dir so the 50s data-graph parse happens only once.
+// `pristine_data` is copied (deep) per call so each query starts from the same
+// graph state; the update stream is provided pre-parsed in `stream_updates`.
+// Returns positive match count (UINT64_MAX on timeout).
+// ---------------------------------------------------------------------------
+static uint64_t run_one_query(
+    const std::string& query_path,
+    const Graph& pristine_data,
+    const std::vector<InsertUnit>& stream_updates,
+    const std::string& algorithm,
+    const std::string& update_mode,
+    uint max_num_results, bool print_prep, bool print_enum, bool homo,
+    size_t thread_num, size_t auto_tuning, uint time_limit)
+{
+    Graph query_graph {};
+    query_graph.LoadFromFile(query_path);
+
+    // Fresh copy of the data graph for this query (deep copy of vectors — fast,
+    // ~1s for LJ vs ~50s to re-parse from disk).
+    Graph data_graph = pristine_data;
+
+    matching* mm = nullptr;
+    Parallel_Graphflow* pg = nullptr;
+    Parrllel_SymBi* ps = nullptr;
+    Parallel_TurboFlux* pt = nullptr;
+    if (algorithm == "parallel_graphflow")
+        mm = pg = new Parallel_Graphflow(query_graph, data_graph, max_num_results, print_prep, print_enum, homo, thread_num, auto_tuning);
+    else if (algorithm == "parallel_symbi")
+        mm = ps = new Parrllel_SymBi(query_graph, data_graph, max_num_results, print_prep, print_enum, homo, {}, thread_num, auto_tuning);
+    else if (algorithm == "parallel_turboflux")
+        mm = pt = new Parallel_TurboFlux(query_graph, data_graph, max_num_results, print_prep, print_enum, homo, thread_num, auto_tuning);
+    else {
+        std::cout << "[batch] unsupported algorithm for --query-dir: " << algorithm << std::endl;
+        return 0;
+    }
+    (void)pg; (void)ps; (void)pt;
+
+    mm->Preprocessing();
+
+    // Load the (pre-parsed) update stream into this copy.
+    data_graph.updates_vec_ = stream_updates;
+
+    size_t num_v = 0, num_e = 0, unsafe = 0, count = 0, pos_last = 0, neg_last = 0;
+    std::atomic_bool reach_time_limit{false};
+
+    auto run = [&]() {
+        RunUpdates_InterExecutor(data_graph, mm, num_v, num_e, unsafe, count,
+            pos_last, neg_last, reach_time_limit, update_mode, thread_num);
+    };
+    execute_with_time_limit(run, time_limit, reach_time_limit);
+
+    uint64_t pos = 0;
+    if (reach_time_limit) { delete mm; return UINT64_MAX; }
+    size_t p = 0; mm->GetNumPositiveResults(p); pos = p;
+    delete mm;
+    return pos;
+}
 
 
 int main(int argc, char *argv[])
@@ -176,6 +260,7 @@ int main(int argc, char *argv[])
     CLI::App app{"App description"};
 
     std::string query_path = "", initial_path = "", stream_path = "", algorithm = "none";
+    std::string query_dir = "", csv_out = "";
     std::string update_mode = "batch3"; // batch, batch2, batch3, batch4, openmp, queue, single
     uint max_num_results = UINT_MAX, time_limit = UINT_MAX, initial_time_limit = UINT_MAX;
     bool print_prep = true, print_enum = false, homo = false, report_initial = true;
@@ -185,7 +270,9 @@ int main(int argc, char *argv[])
 
     size_t auto_tuning = 1;
 
-    app.add_option("-q,--query", query_path, "query graph path")->required();
+    app.add_option("-q,--query", query_path, "query graph path");
+    app.add_option("--query-dir", query_dir, "directory of query graphs (batch: load data once, run all)");
+    app.add_option("--csv-out", csv_out, "append batch results to this CSV file");
     app.add_option("-d,--data", initial_path, "initial data graph path")->required();
     app.add_option("-u,--update", stream_path, "data graph update stream path")->required();
     app.add_option("-a,--algorithm", algorithm, "algorithm");
@@ -203,6 +290,53 @@ int main(int argc, char *argv[])
 
     
     CLI11_PARSE(app, argc, argv);
+
+    // ----- Batch mode: --query-dir loads data + stream ONCE, runs all queries -----
+    if (!query_dir.empty()) {
+        auto t_load = My_Get_Time();
+        std::cout << "----------- Batch: loading data once ------------" << std::endl;
+        Graph pristine_data {};
+        pristine_data.LoadFromFile(initial_path);
+        pristine_data.PrintMetaData();
+        pristine_data.LoadUpdateStream(stream_path);
+        std::vector<InsertUnit> stream_updates = pristine_data.updates_vec_;
+        Print_Time("Load data + stream: ", t_load);
+
+        // collect & sort query files
+        std::vector<std::string> qfiles;
+        for (auto& e : std::filesystem::directory_iterator(query_dir))
+            if (e.is_regular_file()) qfiles.push_back(e.path().string());
+        std::sort(qfiles.begin(), qfiles.end());
+        std::cout << "[batch] " << qfiles.size() << " queries in " << query_dir << std::endl;
+
+        FILE* csv = nullptr;
+        if (!csv_out.empty()) { csv = fopen(csv_out.c_str(), "a"); }
+
+        for (size_t i = 0; i < qfiles.size(); i++) {
+            auto t_q = My_Get_Time();
+            uint64_t pos = run_one_query(qfiles[i], pristine_data, stream_updates,
+                algorithm, update_mode, max_num_results, false, false, homo,
+                thread_num, auto_tuning, time_limit);
+            double ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                My_Get_Time() - t_q).count();
+            std::string qname = std::filesystem::path(qfiles[i]).filename().string();
+            if (pos == UINT64_MAX)
+                printf("[batch] %4zu/%zu  %-12s  TIMEOUT      (%.0fms)\n", i+1, qfiles.size(), qname.c_str(), ms);
+            else
+                printf("[batch] %4zu/%zu  %-12s  %15llu  (%.0fms)\n", i+1, qfiles.size(), qname.c_str(),
+                       (unsigned long long)pos, ms);
+            fflush(stdout);
+            if (csv) {
+                fprintf(csv, "%s,%s,%s,%s\n", query_dir.c_str(), qname.c_str(),
+                        (pos==UINT64_MAX? "TIMEOUT" : std::to_string(pos).c_str()),
+                        update_mode.c_str());
+                fflush(csv);
+            }
+        }
+        if (csv) fclose(csv);
+        std::cout << "[batch] done." << std::endl;
+        return 0;
+    }
 
     // std::cout << "use " << thread_num << " threads for incresemental matching " << std::endl;
     
@@ -232,6 +366,7 @@ int main(int argc, char *argv[])
     Parrllel_SymBi *parrallel = nullptr;
     Parallel_TurboFlux *parallel_turboflux = nullptr;
     Parallel_Graphflow *parallel_graphflow = nullptr;
+    Parallel_CaLiG *parallel_calig = nullptr;
     
     start = My_Get_Time();
 
@@ -254,6 +389,10 @@ int main(int argc, char *argv[])
         mm = parallel_turboflux = new Parallel_TurboFlux(query_graph, data_graph, max_num_results, print_prep, print_enum, homo, thread_num, auto_tuning);
     else if (algorithm == "parallel_graphflow")
         mm = parallel_graphflow = new Parallel_Graphflow (query_graph, data_graph, max_num_results, print_prep, print_enum, homo, thread_num, auto_tuning);
+    else if (algorithm == "parallel_calig")
+        mm = parallel_calig = new Parallel_CaLiG(query_graph, data_graph, max_num_results, print_prep, print_enum, homo, thread_num, auto_tuning);
+    else if (algorithm == "parallel_newsp")
+        mm = new Parallel_NewSP_Adapter(query_graph, data_graph, max_num_results, print_prep, print_enum, homo, thread_num, auto_tuning);
     else if (algorithm == "none")
         mm                  = new matching      (query_graph, data_graph, max_num_results, print_prep, print_enum, homo);
     else

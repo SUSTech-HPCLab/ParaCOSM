@@ -1,0 +1,16 @@
+# LaTeX build artifacts
+*.aux
+*.bbl
+*.blg
+*.log
+*.out
+*.fdb_latexmk
+*.fls
+*.synctex.gz
+*.nav
+*.snm
+*.toc
+*.vrb
+
+# Raw extracted template (kept locally, not in git)
+acm_template/

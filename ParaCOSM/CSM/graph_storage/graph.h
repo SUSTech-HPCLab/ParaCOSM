@@ -73,6 +73,8 @@ protected:
     // Hash index for high-degree vertices: neighbor_id → edge_label
     static constexpr uint HASH_DEGREE_THRESHOLD = 64;
     std::vector<std::unordered_map<uint, uint>> hash_adj_;
+    // Per-edge timestamps for versioned search
+    std::vector<std::vector<uint>> edge_timestamps_;
 
 public:
     std::queue<InsertUnit> updates_;
@@ -91,13 +93,29 @@ public:
     void AddVertex(uint id, uint label);
     void RemoveVertex(uint id);
     void AddEdge(uint v1, uint v2, uint label);
+    void AddEdgeVersioned(uint v1, uint v2, uint label, uint timestamp);
+
+    // Batch parallel insert with per-edge timestamps.
+    // Each edge: {v1, v2, label, timestamp}. Duplicates (already-existing or
+    // repeated) are skipped. Returns the number of newly-inserted edges.
+    struct VersionedEdgeBatch { uint v1, v2, label, timestamp; };
+    size_t AddEdgesVersionedBatch(const std::vector<VersionedEdgeBatch>& edges,
+                                  size_t num_threads);
+
     void RemoveEdge(uint v1, uint v2);
 
     uint GetVertexLabel(uint u) const;
     const std::vector<uint>& GetNeighbors(uint v) const;
     const std::vector<uint>& GetNeighborLabels(uint v) const;
+    const std::vector<uint>& GetEdgeTimestamps(uint v) const;
     uint GetDegree(uint v) const;
     std::tuple<uint, uint, uint> GetEdgeLabel(uint v1, uint v2) const;
+
+    void InitTimestamps();
+    void ClearTimestamps();
+
+    // Get timestamp of edge (v1, v2). Returns 0 if no timestamps or edge not found.
+    uint GetEdgeTimestamp(uint v1, uint v2) const;
 
     /// Fast joinability check: is dst a neighbor of src with the given edge label?
     inline bool HasNeighborWithLabel(uint src, uint dst, uint label) const {
