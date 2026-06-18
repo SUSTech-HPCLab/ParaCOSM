@@ -208,7 +208,8 @@ static uint64_t run_one_query(
     const std::string& algorithm,
     const std::string& update_mode,
     uint max_num_results, bool print_prep, bool print_enum, bool homo,
-    size_t thread_num, size_t auto_tuning, uint time_limit)
+    size_t thread_num, size_t auto_tuning, uint time_limit,
+    double* search_ms = nullptr)   // out: incremental-matching time only (excl. copy/preproc)
 {
     Graph query_graph {};
     query_graph.LoadFromFile(query_path);
@@ -245,7 +246,14 @@ static uint64_t run_one_query(
         RunUpdates_InterExecutor(data_graph, mm, num_v, num_e, unsafe, count,
             pos_last, neg_last, reach_time_limit, update_mode, thread_num);
     };
+    // Time ONLY the incremental-matching phase (deep copy + preprocessing above
+    // are excluded, so the reported time is comparable to single-query mode's
+    // "Incremental Matching:" — not polluted by the ~6s LJ graph deep copy).
+    auto t_search = std::chrono::high_resolution_clock::now();
     execute_with_time_limit(run, time_limit, reach_time_limit);
+    double ms = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::high_resolution_clock::now() - t_search).count() / 1000.0;
+    if (search_ms) *search_ms = ms;
 
     uint64_t pos = 0;
     if (reach_time_limit) { delete mm; return UINT64_MAX; }
@@ -314,22 +322,26 @@ int main(int argc, char *argv[])
 
         for (size_t i = 0; i < qfiles.size(); i++) {
             auto t_q = My_Get_Time();
+            double search_ms = 0.0;
             uint64_t pos = run_one_query(qfiles[i], pristine_data, stream_updates,
                 algorithm, update_mode, max_num_results, false, false, homo,
-                thread_num, auto_tuning, time_limit);
-            double ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                thread_num, auto_tuning, time_limit, &search_ms);
+            double wall_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                 My_Get_Time() - t_q).count();
             std::string qname = std::filesystem::path(qfiles[i]).filename().string();
+            // wall = copy+preproc+search; search_ms = incremental matching only.
             if (pos == UINT64_MAX)
-                printf("[batch] %4zu/%zu  %-12s  TIMEOUT      (%.0fms)\n", i+1, qfiles.size(), qname.c_str(), ms);
+                printf("[batch] %4zu/%zu  %-12s  TIMEOUT      (search=%.0fms wall=%.0fms)\n",
+                       i+1, qfiles.size(), qname.c_str(), search_ms, wall_ms);
             else
-                printf("[batch] %4zu/%zu  %-12s  %15llu  (%.0fms)\n", i+1, qfiles.size(), qname.c_str(),
-                       (unsigned long long)pos, ms);
+                printf("[batch] %4zu/%zu  %-12s  %15llu  (search=%.0fms wall=%.0fms)\n",
+                       i+1, qfiles.size(), qname.c_str(), (unsigned long long)pos, search_ms, wall_ms);
             fflush(stdout);
             if (csv) {
-                fprintf(csv, "%s,%s,%s,%s\n", query_dir.c_str(), qname.c_str(),
+                // cols: dir, query, matches, mode, search_ms, threads
+                fprintf(csv, "%s,%s,%s,%s,%.1f,%zu\n", query_dir.c_str(), qname.c_str(),
                         (pos==UINT64_MAX? "TIMEOUT" : std::to_string(pos).c_str()),
-                        update_mode.c_str());
+                        update_mode.c_str(), search_ms, thread_num);
                 fflush(csv);
             }
         }
