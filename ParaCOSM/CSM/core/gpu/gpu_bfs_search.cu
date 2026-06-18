@@ -1480,7 +1480,6 @@ uint64_t GPUBFSSearch::SearchSingleEdgeBFS(
     if (!csr_built_ || !query_set_) return 0;
 
     uint32_t Q = num_query_vertices;
-    uint32_t stride = Q + 1;
 
     EnsureEdgesCapacity(1);
     EnsureBufCapacity(Q);
