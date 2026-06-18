@@ -5,6 +5,8 @@
 #include <thread>
 #include <filesystem>
 #include <algorithm>
+#include <unistd.h>
+#include <sys/wait.h>
 
 #include <omp.h>
 
@@ -322,15 +324,54 @@ int main(int argc, char *argv[])
 
         for (size_t i = 0; i < qfiles.size(); i++) {
             auto t_q = My_Get_Time();
-            double search_ms = 0.0;
-            uint64_t pos = run_one_query(qfiles[i], pristine_data, stream_updates,
-                algorithm, update_mode, max_num_results, false, false, homo,
-                thread_num, auto_tuning, time_limit, &search_ms);
+            std::string qname = std::filesystem::path(qfiles[i]).filename().string();
+
+            // Crash isolation: run each query in a forked child. A segfault (a
+            // few degenerate queries, e.g. disconnected query graphs, hit a
+            // pre-existing bug in the search recursion) kills only the child;
+            // the parent records CRASH and continues. The child inherits the
+            // already-loaded pristine_data via copy-on-write (no re-parse, no
+            // eager deep copy). Result is returned through a pipe.
+            int pfd[2];
+            if (pipe(pfd) != 0) { perror("pipe"); break; }
+            pid_t pid = fork();
+            if (pid == 0) {
+                // ---- child ----
+                close(pfd[0]);
+                double search_ms = 0.0;
+                uint64_t pos = run_one_query(qfiles[i], pristine_data, stream_updates,
+                    algorithm, update_mode, max_num_results, false, false, homo,
+                    thread_num, auto_tuning, time_limit, &search_ms);
+                // write "pos search_ms" to the pipe
+                char buf[64];
+                int n = snprintf(buf, sizeof(buf), "%llu %.1f",
+                                 (unsigned long long)pos, search_ms);
+                ssize_t w = write(pfd[1], buf, n);
+                (void)w;
+                close(pfd[1]);
+                _exit(0);   // skip C++ static destructors in the child
+            }
+            // ---- parent ----
+            close(pfd[1]);
+            char buf[64] = {0};
+            ssize_t rd = read(pfd[0], buf, sizeof(buf) - 1);
+            close(pfd[0]);
+            int status = 0;
+            waitpid(pid, &status, 0);
             double wall_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                 My_Get_Time() - t_q).count();
-            std::string qname = std::filesystem::path(qfiles[i]).filename().string();
+
+            bool crashed = !WIFEXITED(status) || (rd <= 0);
+            uint64_t pos = 0; double search_ms = 0.0;
+            if (!crashed) {
+                unsigned long long p = 0; sscanf(buf, "%llu %lf", &p, &search_ms); pos = p;
+            }
             // wall = copy+preproc+search; search_ms = incremental matching only.
-            if (pos == UINT64_MAX)
+            if (crashed)
+                printf("[batch] %4zu/%zu  %-12s  CRASH        (wall=%.0fms sig=%d)\n",
+                       i+1, qfiles.size(), qname.c_str(), wall_ms,
+                       WIFSIGNALED(status) ? WTERMSIG(status) : -1);
+            else if (pos == UINT64_MAX)
                 printf("[batch] %4zu/%zu  %-12s  TIMEOUT      (search=%.0fms wall=%.0fms)\n",
                        i+1, qfiles.size(), qname.c_str(), search_ms, wall_ms);
             else
@@ -339,9 +380,11 @@ int main(int argc, char *argv[])
             fflush(stdout);
             if (csv) {
                 // cols: dir, query, matches, mode, search_ms, threads
+                std::string mcol = crashed ? std::string("CRASH")
+                                 : (pos==UINT64_MAX ? std::string("TIMEOUT")
+                                                    : std::to_string(pos));
                 fprintf(csv, "%s,%s,%s,%s,%.1f,%zu\n", query_dir.c_str(), qname.c_str(),
-                        (pos==UINT64_MAX? "TIMEOUT" : std::to_string(pos).c_str()),
-                        update_mode.c_str(), search_ms, thread_num);
+                        mcol.c_str(), update_mode.c_str(), search_ms, thread_num);
                 fflush(csv);
             }
         }
