@@ -5,6 +5,8 @@
 #include <cstring>
 #include <chrono>
 #include <algorithm>
+#include <stdexcept>
+#include <string>
 #include <omp.h>
 
 #define CUDA_CHECK(call)                                                       \
@@ -20,7 +22,13 @@
 // Query graph in constant memory
 // ============================================================
 static constexpr int BFS_MAX_Q = 20;
-static constexpr int BFS_MAX_Q_EDGES = 64;
+// Directed neighbor entries = sum of query-vertex degrees = 2 * (#query edges).
+// Must cover the worst case: a complete graph on BFS_MAX_Q vertices has
+// BFS_MAX_Q*(BFS_MAX_Q-1) = 20*19 = 380 directed entries. Was 64, which silently
+// overflowed constant memory for dense queries (e.g. a 9v/33e near-complete query
+// needs 66 > 64), corrupting bfs_q_elabels and breaking joinability pruning ->
+// match explosion. SetupQuery now also asserts against this bound.
+static constexpr int BFS_MAX_Q_EDGES = 384;
 
 __constant__ uint32_t bfs_q_num_vertices;
 __constant__ uint32_t bfs_q_vlabels[BFS_MAX_Q];
@@ -1122,6 +1130,21 @@ void GPUBFSSearch::SetupQuery(const Graph& query) {
     qoff[0] = 0;
     for (uint32_t u = 0; u < Q; u++) qoff[u+1] = qoff[u] + query.GetDegree(u);
     uint32_t qt = qoff[Q];
+
+    // Guard against silent constant-memory overflow. qt = sum of degrees =
+    // 2 * (#edges). If it exceeds the constant array size, cudaMemcpyToSymbol
+    // would clobber adjacent symbols and corrupt joinability pruning.
+    if (Q > (uint32_t)BFS_MAX_Q) {
+        throw std::runtime_error("GPUBFSSearch::SetupQuery: query has " +
+            std::to_string(Q) + " vertices > BFS_MAX_Q=" +
+            std::to_string(BFS_MAX_Q));
+    }
+    if (qt > (uint32_t)BFS_MAX_Q_EDGES) {
+        throw std::runtime_error("GPUBFSSearch::SetupQuery: query neighbor "
+            "entries (2*edges)=" + std::to_string(qt) +
+            " > BFS_MAX_Q_EDGES=" + std::to_string(BFS_MAX_Q_EDGES) +
+            "; raise BFS_MAX_Q_EDGES");
+    }
 
     std::vector<uint32_t> qn(qt), qe(qt);
     for (uint32_t u = 0; u < Q; u++) {
