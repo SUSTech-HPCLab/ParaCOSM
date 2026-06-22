@@ -549,7 +549,18 @@ __global__ void __launch_bounds__(256, 8) bfs_expand_count_lj_kernel(
     uint32_t stride = Q + 1;
     const uint32_t* pm = in_buf + (size_t)warp_id * stride;
     uint32_t order_idx = pm[0];
-    const uint32_t* m = pm + 1;
+
+    // Cache the partial match m[] (Q vertices) in shared memory. m[] is read-only
+    // here and hit repeatedly: every INNER candidate w rescans it for the visited
+    // check, and the joinability loop reads m[uo] per query-neighbour. Only
+    // Q×4 ≤ 80 B/warp → 8 warps/block ≤ 640 B, far under the ~20 KB/block budget
+    // that keeps __launch_bounds__(256,8) at full occupancy, so this is additive.
+    __shared__ uint32_t s_m_block[8][BFS_MAX_Q];
+    uint32_t warp_in_block = threadIdx.x >> 5;
+    uint32_t* s_m = s_m_block[warp_in_block];
+    for (uint32_t t = lane; t < Q; t += 32) s_m[t] = pm[1 + t];
+    __syncwarp();
+    const uint32_t* m = s_m;
 
     const uint32_t* order = all_orders + order_idx * Q;
     uint32_t u  = order[depth];
