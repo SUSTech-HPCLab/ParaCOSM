@@ -517,8 +517,18 @@ __global__ void bfs_expand_count_kernel(
 // (order[Q-1]) across the 32 lanes. When the inner list is long (hubs on LJ),
 // all lanes stay busy. Identical match semantics → same count.
 // Selected at runtime for low-unsafe-edge / sparse workloads.
+//
+// __launch_bounds__(256, 8): ncu shows this kernel is memory-latency-bound —
+// 9.15 of ~17 stall cycles per issued instruction are long_scoreboard (waiting
+// on global loads from the joinability bsearch). Occupancy was capped at 53%
+// because the compiler used 40 regs/thread (→ Block Limit Registers = 6). On
+// A100 (64K regs/SM, 2048 threads/SM), reaching 8 blocks × 256 = 2048 threads
+// needs ≤32 regs/thread. The hint forces ptxas to that budget (REG 40→32). It
+// costs a small spill (STACK 0→32 B), but the spilled slots hit L1 (81% hit)
+// while the extra resident warps hide the global-load latency — net win measured
+// at +10–12% on heavy LJ 9v queries (Q_49/69/9), counts bit-identical.
 // ============================================================
-__global__ void bfs_expand_count_lj_kernel(
+__global__ void __launch_bounds__(256, 8) bfs_expand_count_lj_kernel(
     const uint32_t* __restrict__ csr_offsets,
     const uint32_t* __restrict__ csr_neighbors,
     const uint32_t* __restrict__ csr_elabels,
@@ -1375,19 +1385,18 @@ void GPUBFSSearch::BFSFromDepth(uint32_t* in_buf, uint32_t in_count,
         // explicit two-kernel flow (timestamp logic).
         if (!versioned && depth == Q - 2 && Q >= 3) {
             grid = (uint32_t)(((uint64_t)cur_count * 32 + block - 1) / block);
+            // Env GPU_BFS_LJ_V2 selects the OUTER-parallel v2 (default off → keep
+            // the validated v1 inner-parallel kernel). Read once, cached. Declared
+            // here (not inside the sparse branch) so the tag print below can read it.
+            static int lj_v2 = []{
+                const char* e = getenv("GPU_BFS_LJ_V2");
+                return (e && e[0] == '1') ? 1 : 0;
+            }();
             // Pick fusion kernel by graph density (set in BuildCSR). Sparse
             // graphs (LJ) have short outer candidate lists → the default
             // outer-parallel kernel starves lanes (1.64/32); the LJ variant
             // parallelises the inner list instead.
             if (sparse_mode_) {
-                // Env GPU_BFS_LJ_V2 selects the OUTER-parallel v2 (default off →
-                // keep the validated v1 inner-parallel kernel). v2 removes v1's
-                // 32x outer-redundant joinability compute; best for small-fanout
-                // queries. See kernel comments for the trade-off.
-                static int lj_v2 = []{
-                    const char* e = getenv("GPU_BFS_LJ_V2");
-                    return (e && e[0] == '1') ? 1 : 0;
-                }();
                 if (lj_v2) {
                     bfs_expand_count_lj_v2_kernel<<<grid, block>>>(
                         d_csr_offsets_, d_csr_neighbors_, d_csr_elabels_, d_vlabels_,
