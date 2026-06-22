@@ -358,3 +358,66 @@ the on-device data structure or the dataset's label profile (③). Further GPU
 gains need a different lever (cut the total matches to count, or a bucketed
 index), not a kernel micro-rewrite. Three of four ideas were retired by a
 sub-5-minute diagnostic instead of a full build-test-revert cycle.
+
+---
+
+## Round 4 — shared-mem win + full ncu profile + the INNER floor (2026-06)
+
+### Win (committed ed5ee8d): cache m[] in shared memory → +10–12%
+
+m[] (the partial match, Q vertices) is read-only and hammered: every INNER
+candidate w rescans it for the visited check, and joinability reads m[uo] per
+query-neighbour. Staging it to shared once per warp (640 B/block) stacks on top
+of __launch_bounds__ without costing occupancy, and even drops the stack spill
+32→24 B. Q_49 9842 ms (was 10985 after A alone), Q_9 −10%, counts bit-identical.
+Cumulative with A: ~+22% on heavy LJ.
+
+### Full ncu profile of the long kernel (9v Q_49, 210 B matches)
+
+Two infrastructure lessons getting ncu to attach to the real kernel:
+- **fork**: batch mode (`--query-dir`) forks a child per query; ncu sees only
+  the parent and hangs at "Profiling 0%" forever. Fix: `--target-processes all`.
+- **`--set full` is infeasible on an 85 s kernel**: 7381 metrics → dozens of
+  replay passes × 85 s each = effectively hung (41 min at 0%). `--set detailed`
+  (1071 metrics, still has SourceCounters) finishes and exports a .ncu-rep.
+- Backup size scales with live buffer; shrinking MAX_BUF_MATCHES 400M→100M for a
+  profiling-only build cut the ncu save/restore from ~48 GB to ~12 GB.
+
+Report: `analysis/gpu_ncu/lj_count_DETAILED_9vQ49_shmem.ncu-rep`. Headline SOL
+(post A+B): Duration 11.83 s (locked clocks), SM 70.3%, **occupancy 78.4%**,
+DRAM 0.02%, L1 85.6%, L2 99.98%. ncu's top tip: **"uncoalesced global accesses,
+403 B excessive sectors (53% of total), Est. Speedup 50.97%."**
+
+### NEG ×2 — chasing that 53% uncoalesced number both failed
+
+ncu's 50.97% is a *theoretical* ceiling that assumes you can coalesce the loads
+without changing anything else. Two attempts proved the scatter is intrinsic to
+the algorithm's data-parallel structure, not a fixable instruction:
+
+| attempt | idea | Q_49 | Q_69 | Q_9 | result |
+|---|---|---:|---:|---:|---|
+| A (OPT-D) 2-phase bsearch | cache 32 pivots in smem, halve global probes | 14737 | 3979 | 2951 | **0.67–0.80× SLOWER** |
+| E (OPT-E) linear scan | replace bsearch on short lists with a "coalesced" forward scan | 12808 | 3987 | 2713 | **0.77–0.83× SLOWER** |
+
+Both bit-identical counts. Why both lose:
+- **A**: LJ degree is tiny (99% ≤32, median 2). The pivot-sampling + __syncwarp
+  overhead dwarfs the few global probes it saves; the `nc>=32` gate means the
+  2-phase path almost never even fires, yet the INNER-loop restructure
+  (k_base + jn flags + __any_sync) it needs is paid every iteration.
+- **E**: the "lockstep broadcast" premise is false. Each lane processes its OWN
+  w (`for k=lane`), so lanes enter joinability at different times, hold different
+  w, and match at different positions — they do NOT read the same arr[i] in the
+  same cycle. Loads stay scattered, and linear O(n) loses to bsearch O(log n) on
+  the rare long list.
+
+### Round-4 takeaway
+
+The INNER scatter (`vlabels[w]`, `csr_neighbors[mid]` in bsearch) is **inherent**:
+w is a hub neighbour, so reading its label or binary-searching for it is random
+by construction. ncu's "53% wasted sectors / +50%" can't be cashed by swapping
+the search algorithm — it's a property of the per-lane-one-w parallel mapping.
+Eliminating it would require warp-cooperative processing of a single w (merging
+the neighbour reads), which is exactly the OUTER-parallel direction v2 already
+proved loses the INNER parallelism. **Net: A (__launch_bounds__) + B (shared m[])
+are the bankable wins (+22% cumulative); three INNER micro-rewrites (v2, OPT-D,
+OPT-E) all regressed. The kernel is at its algorithmic floor for this mapping.**
