@@ -1,0 +1,53 @@
+----------- Loading graphs ------------
+# vertices = 8
+# edges = 7
+# vertices = 403394
+# edges = 2199067
+Load Graphs: 1681.16ms
+------------ Preprocessing ------------
+matching order: 
+-vertex(backward neighbors)-
+#0: 0-1(0)-4(1)-6(0)-7(6)-3(7)-2(4)-5(3)
+#1: 4-1(4)-0(1)-6(0)-7(6)-3(7)-2(4)-5(3)
+#2: 6-0(6)-1(0)-4(1)-7(6)-3(7)-2(4)-5(3)
+#3: 7-6(7)-0(6)-1(0)-3(7)-4(1)-2(4)-5(3)
+#4: 3-7(3)-6(7)-0(6)-1(0)-4(1)-2(4)-5(3)
+#5: 2-4(2)-1(4)-0(1)-6(0)-7(6)-3(7)-5(3)
+#6: 5-3(5)-7(3)-6(7)-0(6)-1(0)-4(1)-2(4)
+
+Preprocessing: 1.115ms
+--------- Incremental Matching --------
+auto_tuning on:1
+==PROF== Connected to process 169126 (/home/v-haibinlai/haibin/ParaCOSM/ParaCOSM/CSM/build/bin/csm)
+==PROF== Profiling "bfs_expand_kernel": 0%
+==WARNING== Backing up device memory in system memory. Kernel replay might be slow. Consider using "--replay-mode application" to avoid memory save-and-restore.
+....50%....100% - 52 passes
+[BFS] CSR built: V=403394, E=4431688, 43.2ms
+[BFS] Buffers allocated: 3 x 13732MB (max 400M partial matches)
+[BFS] Init: 234878 tasks → 19582 partial matches (0.4ms)
+[BFS] Depth 2→3: 19582 → 91473 partial matches
+[BFS] Depth 3→4: 91473 → 308026 partial matches
+[BFS] Depth 4→5: 308026 → 2519598 partial matches
+[BFS] Depth 5→6: 2519598 → 9159998 partial matches
+[BFS] Fused depth 6->7 (count, no materialise): 9159998 input pm
+[BFS] Search complete: 201122759 matches, 7839.1ms
+[GPU-BFS] Complete:
+  classify:    5.613 ms
+  add edges:   11.06 ms (16777 unsafe)
+  build CSR:   858.735 ms
+  BFS search:  7842.07 ms (201122759 matches)
+  total time:  8717.52 ms
+Incremental Matching: 8732.66ms
+0 vertex updates.
+50000 edge updates.
+16777 unsafe updates.
+201122759 positive matches.
+0 negative matches.
+
+# edges in index in total: 0
+# vertices in index in total: 0
+Peak Virtual Memory: 90339232 KB
+
+----------------- End -----------------
+==PROF== Disconnected from process 169126
+==PROF== Report: /home/v-haibinlai/haibin/ParaCOSM/analysis/gpu_ncu/expand_AFTER_optc_8vQ5.ncu-rep

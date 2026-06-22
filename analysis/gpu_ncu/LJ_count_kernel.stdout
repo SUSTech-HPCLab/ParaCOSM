@@ -1,0 +1,58 @@
+----------- Loading graphs ------------
+# vertices = 9
+# edges = 9
+# vertices = 4847571
+# edges = 38566113
+Load Graphs: 54108.6ms
+------------ Preprocessing ------------
+matching order: 
+-vertex(backward neighbors)-
+#0: 7-5(7)-0(5)-2(5)-3(7)-8(3,7)-1(0)-4(7)-6(2)
+#1: 0-5(0)-7(5)-2(5)-3(7)-8(3,7)-1(0)-4(7)-6(2)
+#2: 2-5(2)-7(5)-0(5)-3(7)-8(3,7)-1(0)-4(7)-6(2)
+#3: 3-7(3)-8(3,7)-5(7)-0(5)-2(5)-1(0)-4(7)-6(2)
+#4: 8-3(8)-7(3,8)-5(7)-0(5)-2(5)-1(0)-4(7)-6(2)
+#5: 8-7(8)-3(7,8)-5(7)-0(5)-2(5)-1(0)-4(7)-6(2)
+#6: 1-0(1)-5(0)-7(5)-2(5)-3(7)-8(3,7)-4(7)-6(2)
+#7: 4-7(4)-5(7)-0(5)-2(5)-3(7)-8(3,7)-1(0)-6(2)
+#8: 6-2(6)-5(2)-7(5)-0(5)-3(7)-8(3,7)-1(0)-4(7)
+
+Preprocessing: 4.197ms
+--------- Incremental Matching --------
+auto_tuning on:1
+==PROF== Connected to process 223296 (/home/v-haibinlai/haibin/ParaCOSM/ParaCOSM/CSM/build/bin/csm)
+==PROF== Profiling "bfs_expand_count_kernel": 0%
+==WARNING== Backing up device memory in system memory. Kernel replay might be slow. Consider using "--replay-mode application" to avoid memory save-and-restore.
+
+==WARNING== Launching the workload is taking more time than expected. If this continues to hang, terminate the profile and re-try by profiling the range of all related launches using '--replay-mode range'. See https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#replay for more details.
+....50%....100% - 61 passes
+[BFS] CSR built: V=4847571, E=77132926, 697.4ms
+[BFS] Buffers allocated: 3 x 15258MB (max 400M partial matches)
+[BFS] Init: 6300 tasks → 370 partial matches (0.5ms)
+[BFS] Depth 2→3: 370 → 1343 partial matches
+[BFS] Depth 3→4: 1343 → 24944 partial matches
+[BFS] Depth 4→5: 24944 → 247771 partial matches
+[BFS] Depth 5→6: 247771 → 3084469 partial matches
+[BFS] Depth 6→7: 3084469 → 11166095 partial matches
+[BFS] Fused depth 7->8 (count, no materialise): 11166095 input pm
+[BFS] Search complete: 2879458550 matches, 1090489.5ms
+[GPU-BFS] Complete:
+  classify:    5.124 ms
+  add edges:   0.516 ms (350 unsafe)
+  build CSR:   2026.86 ms
+  BFS search:  1.09049e+06 ms (2879458550 matches)
+  total time:  1.09253e+06 ms
+Incremental Matching: 1.09255e+06ms
+0 vertex updates.
+20000 edge updates.
+350 unsafe updates.
+2879458550 positive matches.
+0 negative matches.
+
+# edges in index in total: 0
+# vertices in index in total: 0
+Peak Virtual Memory: 106912792 KB
+
+----------------- End -----------------
+==PROF== Disconnected from process 223296
+==PROF== Report: /home/v-haibinlai/haibin/ParaCOSM/analysis/gpu_ncu/LJ_count_kernel_9vQ1.ncu-rep

@@ -1,0 +1,83 @@
+----------- Loading graphs ------------
+# vertices = 7
+# edges = 12
+# vertices = 4847571
+# edges = 38566113
+Load Graphs: 53078.5ms
+------------ Preprocessing ------------
+matching order: 
+-vertex(backward neighbors)-
+#0: 4-0(4)-5(0,4)-6(0,4,5)-3(4,5,6)-2(0,3)-1(4)
+#1: 5-0(5)-4(0,5)-6(0,4,5)-3(4,5,6)-2(0,3)-1(4)
+#2: 5-4(5)-0(4,5)-6(0,4,5)-3(4,5,6)-2(0,3)-1(4)
+#3: 6-0(6)-4(0,6)-5(0,4,6)-3(4,5,6)-2(0,3)-1(4)
+#4: 6-4(6)-0(4,6)-5(0,4,6)-3(4,5,6)-2(0,3)-1(4)
+#5: 6-5(6)-4(5,6)-0(4,5,6)-3(4,5,6)-2(0,3)-1(4)
+#6: 3-4(3)-5(3,4)-6(3,4,5)-0(4,5,6)-2(0,3)-1(4)
+#7: 3-5(3)-4(3,5)-6(3,4,5)-0(4,5,6)-2(0,3)-1(4)
+#8: 3-6(3)-4(3,6)-5(3,4,6)-0(4,5,6)-2(0,3)-1(4)
+#9: 2-0(2)-4(0)-3(2,4)-5(0,3,4)-6(0,3,4,5)-1(4)
+#10: 2-3(2)-4(3)-0(2,4)-5(0,3,4)-6(0,3,4,5)-1(4)
+#11: 1-4(1)-0(4)-5(0,4)-6(0,4,5)-3(4,5,6)-2(0,3)
+
+Preprocessing: 4.154ms
+--------- Incremental Matching --------
+auto_tuning on:1
+==PROF== Connected to process 233478 (/home/v-haibinlai/haibin/ParaCOSM/ParaCOSM/CSM/build/bin/csm)
+[BFS] CSR built: V=4847571, E=77158150, 726.6ms
+[BFS] Buffers allocated: 3 x 12207MB (max 400M partial matches)
+[BFS] Init: 311088 tasks → 12962 partial matches (0.4ms)
+[BFS] Depth 2→3: 12962 → 21319 partial matches
+[BFS] Depth 3→4: 21319 → 37570 partial matches
+[BFS] Depth 4→5: 37570 → 224592 partial matches
+[BFS] Fused depth 5->6 (count, no materialise): 224592 input pm
+[BFS] Search complete: 24537556 matches, 2244.0ms
+[GPU-BFS] Complete:
+  classify:    16.865 ms
+  add edges:   21.252 ms (12962 unsafe)
+  build CSR:   2947.07 ms
+  BFS search:  2246.75 ms (24537556 matches)
+  total time:  5232.64 ms
+Incremental Matching: 5246.61ms
+0 vertex updates.
+500000 edge updates.
+12962 unsafe updates.
+24537556 positive matches.
+0 negative matches.
+
+# edges in index in total: 0
+# vertices in index in total: 0
+Peak Virtual Memory: 87668644 KB
+
+----------------- End -----------------
+==PROF== Disconnected from process 233478
+"ID","Process ID","Process Name","Host Name","Kernel Name","Context","Stream","Block Size","Grid Size","Device","CC","Section Name","Metric Name","Metric Unit","Metric Value","Rule Name","Rule Type","Rule Description","Estimated Speedup Type","Estimated Speedup"
+"0","233478","csm","127.0.0.1","bfs_expand_count_kernel(const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, unsigned int, unsigned long *, unsigned int, unsigned int)","1","7","(256, 1, 1)","(28074, 1, 1)","0","8.0","GPU Speed Of Light Throughput","DRAM Frequency","hz","1511997685.76",
+"0","233478","csm","127.0.0.1","bfs_expand_count_kernel(const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, unsigned int, unsigned long *, unsigned int, unsigned int)","1","7","(256, 1, 1)","(28074, 1, 1)","0","8.0","GPU Speed Of Light Throughput","SM Frequency","hz","1064990628.73",
+"0","233478","csm","127.0.0.1","bfs_expand_count_kernel(const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, unsigned int, unsigned long *, unsigned int, unsigned int)","1","7","(256, 1, 1)","(28074, 1, 1)","0","8.0","GPU Speed Of Light Throughput","Elapsed Cycles","cycle","41351154",
+"0","233478","csm","127.0.0.1","bfs_expand_count_kernel(const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, unsigned int, unsigned long *, unsigned int, unsigned int)","1","7","(256, 1, 1)","(28074, 1, 1)","0","8.0","GPU Speed Of Light Throughput","Memory Throughput","%","29.18",
+"0","233478","csm","127.0.0.1","bfs_expand_count_kernel(const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, unsigned int, unsigned long *, unsigned int, unsigned int)","1","7","(256, 1, 1)","(28074, 1, 1)","0","8.0","GPU Speed Of Light Throughput","DRAM Throughput","%","0.02",
+"0","233478","csm","127.0.0.1","bfs_expand_count_kernel(const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, unsigned int, unsigned long *, unsigned int, unsigned int)","1","7","(256, 1, 1)","(28074, 1, 1)","0","8.0","GPU Speed Of Light Throughput","Duration","ns","38827488",
+"0","233478","csm","127.0.0.1","bfs_expand_count_kernel(const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, unsigned int, unsigned long *, unsigned int, unsigned int)","1","7","(256, 1, 1)","(28074, 1, 1)","0","8.0","GPU Speed Of Light Throughput","L1/TEX Cache Throughput","%","30.32",
+"0","233478","csm","127.0.0.1","bfs_expand_count_kernel(const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, unsigned int, unsigned long *, unsigned int, unsigned int)","1","7","(256, 1, 1)","(28074, 1, 1)","0","8.0","GPU Speed Of Light Throughput","L2 Cache Throughput","%","3.23",
+"0","233478","csm","127.0.0.1","bfs_expand_count_kernel(const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, unsigned int, unsigned long *, unsigned int, unsigned int)","1","7","(256, 1, 1)","(28074, 1, 1)","0","8.0","GPU Speed Of Light Throughput","SM Active Cycles","cycle","39592869.51",
+"0","233478","csm","127.0.0.1","bfs_expand_count_kernel(const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, unsigned int, unsigned long *, unsigned int, unsigned int)","1","7","(256, 1, 1)","(28074, 1, 1)","0","8.0","GPU Speed Of Light Throughput","Compute (SM) Throughput","%","58.86",
+"0","233478","csm","127.0.0.1","bfs_expand_count_kernel(const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, unsigned int, unsigned long *, unsigned int, unsigned int)","1","7","(256, 1, 1)","(28074, 1, 1)","0","8.0","SpeedOfLight","","","","SOLBottleneck","OPT","This workload exhibits low compute throughput and memory bandwidth utilization relative to the peak performance of this device. Achieved compute throughput and/or memory bandwidth below 60.0% of peak typically indicate latency issues. Look at Scheduler Statistics and Warp State Statistics for potential reasons.","",""
+"0","233478","csm","127.0.0.1","bfs_expand_count_kernel(const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, unsigned int, unsigned long *, unsigned int, unsigned int)","1","7","(256, 1, 1)","(28074, 1, 1)","0","8.0","Warp State Statistics","Warp Cycles Per Issued Instruction","cycle","14.00",
+"0","233478","csm","127.0.0.1","bfs_expand_count_kernel(const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, unsigned int, unsigned long *, unsigned int, unsigned int)","1","7","(256, 1, 1)","(28074, 1, 1)","0","8.0","Warp State Statistics","Warp Cycles Per Executed Instruction","cycle","14.01",
+"0","233478","csm","127.0.0.1","bfs_expand_count_kernel(const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, unsigned int, unsigned long *, unsigned int, unsigned int)","1","7","(256, 1, 1)","(28074, 1, 1)","0","8.0","Warp State Statistics","Avg. Active Threads Per Warp","","1.64",
+"0","233478","csm","127.0.0.1","bfs_expand_count_kernel(const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, unsigned int, unsigned long *, unsigned int, unsigned int)","1","7","(256, 1, 1)","(28074, 1, 1)","0","8.0","Warp State Statistics","Avg. Not Predicated Off Threads Per Warp","","1.49",
+"0","233478","csm","127.0.0.1","bfs_expand_count_kernel(const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, unsigned int, unsigned long *, unsigned int, unsigned int)","1","7","(256, 1, 1)","(28074, 1, 1)","0","8.0","WarpStateStats","","","","CPIStall","WRN","The optional metric smsp__pcsamp_sample_count could not be found. Collecting it as an additional metric could enable the rule to provide more guidance.","",""
+"0","233478","csm","127.0.0.1","bfs_expand_count_kernel(const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, unsigned int, unsigned long *, unsigned int, unsigned int)","1","7","(256, 1, 1)","(28074, 1, 1)","0","8.0","WarpStateStats","","","","CPIStall","OPT","On average, each warp of this workload spends 5.3 cycles being stalled waiting for a scoreboard dependency on a L1TEX (local, global, surface, texture) operation. Find the instruction producing the data being waited upon to identify the culprit. To reduce the number of cycles waiting on L1TEX data accesses verify the memory access patterns are optimal for the target architecture, attempt to increase cache hit rates by increasing data locality (coalescing), or by changing the cache configuration. Consider moving frequently used data to shared memory. This stall type represents about 38.0% of the total average of 14.0 cycles between issuing two instructions.","local","38.05"
+"0","233478","csm","127.0.0.1","bfs_expand_count_kernel(const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, unsigned int, unsigned long *, unsigned int, unsigned int)","1","7","(256, 1, 1)","(28074, 1, 1)","0","8.0","WarpStateStats","","","","CPIStall","INF","Check the Warp Stall Sampling (All Samples) table for the top stall locations in your source based on sampling data. The Profiling Guide (https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#metrics-reference) provides more details on each stall reason.","",""
+"0","233478","csm","127.0.0.1","bfs_expand_count_kernel(const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, unsigned int, unsigned long *, unsigned int, unsigned int)","1","7","(256, 1, 1)","(28074, 1, 1)","0","8.0","WarpStateStats","","","","ThreadDivergence","OPT","Instructions are executed in warps, which are groups of 32 threads. Optimal instruction throughput is achieved if all 32 threads of a warp execute the same instruction. The chosen launch configuration, early thread completion, and divergent flow control can significantly lower the number of active threads in a warp per cycle. This workload achieves an average of 1.6 threads being active per cycle. This is further reduced to 1.5 threads per warp due to predication. The compiler may use predication to avoid an actual branch. Instead, all instructions are scheduled, but a per-thread condition code or predicate controls which threads execute the instructions. Try to avoid different execution paths within a warp when possible.","global","56.11"
+"0","233478","csm","127.0.0.1","bfs_expand_count_kernel(const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, unsigned int, unsigned long *, unsigned int, unsigned int)","1","7","(256, 1, 1)","(28074, 1, 1)","0","8.0","Occupancy","Block Limit SM","block","32",
+"0","233478","csm","127.0.0.1","bfs_expand_count_kernel(const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, unsigned int, unsigned long *, unsigned int, unsigned int)","1","7","(256, 1, 1)","(28074, 1, 1)","0","8.0","Occupancy","Block Limit Registers","block","6",
+"0","233478","csm","127.0.0.1","bfs_expand_count_kernel(const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, unsigned int, unsigned long *, unsigned int, unsigned int)","1","7","(256, 1, 1)","(28074, 1, 1)","0","8.0","Occupancy","Block Limit Shared Mem","block","32",
+"0","233478","csm","127.0.0.1","bfs_expand_count_kernel(const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, unsigned int, unsigned long *, unsigned int, unsigned int)","1","7","(256, 1, 1)","(28074, 1, 1)","0","8.0","Occupancy","Block Limit Warps","block","8",
+"0","233478","csm","127.0.0.1","bfs_expand_count_kernel(const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, unsigned int, unsigned long *, unsigned int, unsigned int)","1","7","(256, 1, 1)","(28074, 1, 1)","0","8.0","Occupancy","Theoretical Active Warps per SM","warp","48",
+"0","233478","csm","127.0.0.1","bfs_expand_count_kernel(const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, unsigned int, unsigned long *, unsigned int, unsigned int)","1","7","(256, 1, 1)","(28074, 1, 1)","0","8.0","Occupancy","Theoretical Occupancy","%","75",
+"0","233478","csm","127.0.0.1","bfs_expand_count_kernel(const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, unsigned int, unsigned long *, unsigned int, unsigned int)","1","7","(256, 1, 1)","(28074, 1, 1)","0","8.0","Occupancy","Achieved Occupancy","%","53.49",
+"0","233478","csm","127.0.0.1","bfs_expand_count_kernel(const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, unsigned int, unsigned long *, unsigned int, unsigned int)","1","7","(256, 1, 1)","(28074, 1, 1)","0","8.0","Occupancy","Achieved Active Warps Per SM","warp","34.23",
+"0","233478","csm","127.0.0.1","bfs_expand_count_kernel(const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, unsigned int, unsigned long *, unsigned int, unsigned int)","1","7","(256, 1, 1)","(28074, 1, 1)","0","8.0","Occupancy","","","","AchievedOccupancy","OPT","The difference between calculated theoretical (75.0%) and measured achieved occupancy (53.5%) can be the result of warp scheduling overheads or workload imbalances during the kernel execution. Load imbalances can occur between warps within a block as well as across blocks of the same kernel. See the CUDA Best Practices Guide (https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#occupancy) for more details on optimizing occupancy.","local","28.68"
+"0","233478","csm","127.0.0.1","bfs_expand_count_kernel(const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, const unsigned int *, unsigned int, unsigned long *, unsigned int, unsigned int)","1","7","(256, 1, 1)","(28074, 1, 1)","0","8.0","Occupancy","","","","TheoreticalOccupancy","OPT","The 12.00 theoretical warps per scheduler this kernel can issue according to its occupancy are below the hardware maximum of 16. This kernel's theoretical occupancy (75.0%) is limited by the number of required registers.","local","25"
