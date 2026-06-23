@@ -353,17 +353,43 @@ int main(int argc, char *argv[])
             }
             // ---- parent ----
             close(pfd[1]);
-            char buf[64] = {0};
-            ssize_t rd = read(pfd[0], buf, sizeof(buf) - 1);
-            close(pfd[0]);
+            // Watchdog: GPU kernels ignore the cooperative reach_time_limit flag
+            // (a kernel runs to completion once launched), so the only reliable
+            // way to bound a runaway query is to SIGKILL the child. Poll for it
+            // up to `time_limit` seconds, then kill. time_limit==UINT_MAX (unset)
+            // means no wall clock cap → wait indefinitely.
             int status = 0;
-            waitpid(pid, &status, 0);
+            bool killed_by_watchdog = false;
+            if (time_limit != UINT_MAX) {
+                double waited = 0.0;
+                const double step = 0.2;  // poll every 200ms
+                while (true) {
+                    pid_t r = waitpid(pid, &status, WNOHANG);
+                    if (r == pid) break;            // child exited
+                    if (r < 0) break;               // error
+                    if (waited >= (double)time_limit) {
+                        kill(pid, SIGKILL);
+                        waitpid(pid, &status, 0);   // reap
+                        killed_by_watchdog = true;
+                        break;
+                    }
+                    struct timespec ts{0, (long)(step * 1e9)};
+                    nanosleep(&ts, nullptr);
+                    waited += step;
+                }
+            } else {
+                waitpid(pid, &status, 0);
+            }
+            char buf[64] = {0};
+            ssize_t rd = killed_by_watchdog ? 0 : read(pfd[0], buf, sizeof(buf) - 1);
+            close(pfd[0]);
             double wall_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                 My_Get_Time() - t_q).count();
 
-            bool crashed = !WIFEXITED(status) || (rd <= 0);
+            bool crashed = !killed_by_watchdog && (!WIFEXITED(status) || (rd <= 0));
             uint64_t pos = 0; double search_ms = 0.0;
-            if (!crashed) {
+            if (killed_by_watchdog) { pos = UINT64_MAX; search_ms = (double)time_limit * 1000.0; }
+            else if (!crashed) {
                 unsigned long long p = 0; sscanf(buf, "%llu %lf", &p, &search_ms); pos = p;
             }
             // wall = copy+preproc+search; search_ms = incremental matching only.
