@@ -5,6 +5,8 @@
 #include <thread>
 #include <filesystem>
 #include <algorithm>
+#include <unistd.h>
+#include <sys/wait.h>
 
 #include <omp.h>
 
@@ -208,7 +210,8 @@ static uint64_t run_one_query(
     const std::string& algorithm,
     const std::string& update_mode,
     uint max_num_results, bool print_prep, bool print_enum, bool homo,
-    size_t thread_num, size_t auto_tuning, uint time_limit)
+    size_t thread_num, size_t auto_tuning, uint time_limit,
+    double* search_ms = nullptr)   // out: incremental-matching time only (excl. copy/preproc)
 {
     Graph query_graph {};
     query_graph.LoadFromFile(query_path);
@@ -245,7 +248,14 @@ static uint64_t run_one_query(
         RunUpdates_InterExecutor(data_graph, mm, num_v, num_e, unsafe, count,
             pos_last, neg_last, reach_time_limit, update_mode, thread_num);
     };
+    // Time ONLY the incremental-matching phase (deep copy + preprocessing above
+    // are excluded, so the reported time is comparable to single-query mode's
+    // "Incremental Matching:" — not polluted by the ~6s LJ graph deep copy).
+    auto t_search = std::chrono::high_resolution_clock::now();
     execute_with_time_limit(run, time_limit, reach_time_limit);
+    double ms = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::high_resolution_clock::now() - t_search).count() / 1000.0;
+    if (search_ms) *search_ms = ms;
 
     uint64_t pos = 0;
     if (reach_time_limit) { delete mm; return UINT64_MAX; }
@@ -314,22 +324,93 @@ int main(int argc, char *argv[])
 
         for (size_t i = 0; i < qfiles.size(); i++) {
             auto t_q = My_Get_Time();
-            uint64_t pos = run_one_query(qfiles[i], pristine_data, stream_updates,
-                algorithm, update_mode, max_num_results, false, false, homo,
-                thread_num, auto_tuning, time_limit);
-            double ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                My_Get_Time() - t_q).count();
             std::string qname = std::filesystem::path(qfiles[i]).filename().string();
-            if (pos == UINT64_MAX)
-                printf("[batch] %4zu/%zu  %-12s  TIMEOUT      (%.0fms)\n", i+1, qfiles.size(), qname.c_str(), ms);
+
+            // Crash isolation: run each query in a forked child. A segfault (a
+            // few degenerate queries, e.g. disconnected query graphs, hit a
+            // pre-existing bug in the search recursion) kills only the child;
+            // the parent records CRASH and continues. The child inherits the
+            // already-loaded pristine_data via copy-on-write (no re-parse, no
+            // eager deep copy). Result is returned through a pipe.
+            int pfd[2];
+            if (pipe(pfd) != 0) { perror("pipe"); break; }
+            pid_t pid = fork();
+            if (pid == 0) {
+                // ---- child ----
+                close(pfd[0]);
+                double search_ms = 0.0;
+                uint64_t pos = run_one_query(qfiles[i], pristine_data, stream_updates,
+                    algorithm, update_mode, max_num_results, false, false, homo,
+                    thread_num, auto_tuning, time_limit, &search_ms);
+                // write "pos search_ms" to the pipe
+                char buf[64];
+                int n = snprintf(buf, sizeof(buf), "%llu %.1f",
+                                 (unsigned long long)pos, search_ms);
+                ssize_t w = write(pfd[1], buf, n);
+                (void)w;
+                close(pfd[1]);
+                _exit(0);   // skip C++ static destructors in the child
+            }
+            // ---- parent ----
+            close(pfd[1]);
+            // Watchdog: GPU kernels ignore the cooperative reach_time_limit flag
+            // (a kernel runs to completion once launched), so the only reliable
+            // way to bound a runaway query is to SIGKILL the child. Poll for it
+            // up to `time_limit` seconds, then kill. time_limit==UINT_MAX (unset)
+            // means no wall clock cap → wait indefinitely.
+            int status = 0;
+            bool killed_by_watchdog = false;
+            if (time_limit != UINT_MAX) {
+                double waited = 0.0;
+                const double step = 0.2;  // poll every 200ms
+                while (true) {
+                    pid_t r = waitpid(pid, &status, WNOHANG);
+                    if (r == pid) break;            // child exited
+                    if (r < 0) break;               // error
+                    if (waited >= (double)time_limit) {
+                        kill(pid, SIGKILL);
+                        waitpid(pid, &status, 0);   // reap
+                        killed_by_watchdog = true;
+                        break;
+                    }
+                    struct timespec ts{0, (long)(step * 1e9)};
+                    nanosleep(&ts, nullptr);
+                    waited += step;
+                }
+            } else {
+                waitpid(pid, &status, 0);
+            }
+            char buf[64] = {0};
+            ssize_t rd = killed_by_watchdog ? 0 : read(pfd[0], buf, sizeof(buf) - 1);
+            close(pfd[0]);
+            double wall_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                My_Get_Time() - t_q).count();
+
+            bool crashed = !killed_by_watchdog && (!WIFEXITED(status) || (rd <= 0));
+            uint64_t pos = 0; double search_ms = 0.0;
+            if (killed_by_watchdog) { pos = UINT64_MAX; search_ms = (double)time_limit * 1000.0; }
+            else if (!crashed) {
+                unsigned long long p = 0; sscanf(buf, "%llu %lf", &p, &search_ms); pos = p;
+            }
+            // wall = copy+preproc+search; search_ms = incremental matching only.
+            if (crashed)
+                printf("[batch] %4zu/%zu  %-12s  CRASH        (wall=%.0fms sig=%d)\n",
+                       i+1, qfiles.size(), qname.c_str(), wall_ms,
+                       WIFSIGNALED(status) ? WTERMSIG(status) : -1);
+            else if (pos == UINT64_MAX)
+                printf("[batch] %4zu/%zu  %-12s  TIMEOUT      (search=%.0fms wall=%.0fms)\n",
+                       i+1, qfiles.size(), qname.c_str(), search_ms, wall_ms);
             else
-                printf("[batch] %4zu/%zu  %-12s  %15llu  (%.0fms)\n", i+1, qfiles.size(), qname.c_str(),
-                       (unsigned long long)pos, ms);
+                printf("[batch] %4zu/%zu  %-12s  %15llu  (search=%.0fms wall=%.0fms)\n",
+                       i+1, qfiles.size(), qname.c_str(), (unsigned long long)pos, search_ms, wall_ms);
             fflush(stdout);
             if (csv) {
-                fprintf(csv, "%s,%s,%s,%s\n", query_dir.c_str(), qname.c_str(),
-                        (pos==UINT64_MAX? "TIMEOUT" : std::to_string(pos).c_str()),
-                        update_mode.c_str());
+                // cols: dir, query, matches, mode, search_ms, threads
+                std::string mcol = crashed ? std::string("CRASH")
+                                 : (pos==UINT64_MAX ? std::string("TIMEOUT")
+                                                    : std::to_string(pos));
+                fprintf(csv, "%s,%s,%s,%s,%.1f,%zu\n", query_dir.c_str(), qname.c_str(),
+                        mcol.c_str(), update_mode.c_str(), search_ms, thread_num);
                 fflush(csv);
             }
         }

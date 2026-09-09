@@ -149,6 +149,80 @@ batch_all 模式的匹配数比串行版多 ~35%，原因：
 
 这是语义差异（overcounting），如需精确匹配数可另加去重逻辑。
 
+### 4.4 局限：热边负载不均衡（heavy-query 失速）⚠️
+
+§4.1 的高加速比来自 **Amazon 8v tree 查询**——这类负载的特征是
+**unsafe 边多、每条边的枚举量相近**，Phase 4 的 `schedule(dynamic,1)`
+把几百条边均匀分给各线程，扩展性好。
+
+但在**重查询**（LiveJournal 9v、匹配数 10⁹–10¹⁰）上，batch_all 的
+inter-update 并行**几乎完全失效**。根因是负载分布反转：
+
+```
+batch_all Phase 4:  #pragma omp parallel for schedule(dynamic, 1)
+                    for (k = 0; k < n_unsafe; k++)
+                        EnumerateNewEdge(unsafe_edges[k])   // 整条边单线程串行枚举
+```
+
+- LJ 2000 条更新流中，**unsafe 边只有 20–47 条**（其余 1950+ 是 safe，秒级跳过）。
+- 而这 10⁹–10¹⁰ 个匹配**高度集中在其中 1–2 条"热边"**上：某条边的第一层
+  fan-out 就有上千万，其子树枚举占全查询 99%+ 的时间。
+- `EnumerateNewEdge` 内部是**纯串行递归**（`FindMatches_local`），没有 intra-edge
+  并行。于是一个线程抢到热边后独自枚举到底，其余 15 个线程处理完几十条轻边
+  后**全部空转干等**。
+- 净效果：16 核退化成 ≈1 核。
+
+**实测（LJ 9v，CPU 1 线程 vs 16 线程，batch_all）：**
+
+| 查询 | 匹配数 | CPU-1t | CPU-16t | **16t/1t 扩展** | GPU-BFS | GPU/CPU-16t |
+|------|------:|-------:|--------:|:---------------:|--------:|:-----------:|
+| Q_69 | 9.39 B | 1,126,297 ms | 1,005,595 ms | **1.12×** | 3,657 ms | **275×** |
+| Q_30 | 9.39 B | 1,117,832 ms | 898,194 ms | **1.24×** | 3,630 ms | 247× |
+| Q_49 | 20.99 B | 2,442,568 ms | 1,463,528 ms | **1.67×** | 12,058 ms | 121× |
+| Q_9  | 6.46 B | 700,453 ms | 419,274 ms | **1.67×** | 2,770 ms | 151× |
+
+Q_69 砸 16 核只快 **1.12×**——等于一个核在干活。**这正是 GPU 的核心优势所在**：
+GPU BFS 把单条热边的枚举铺到数千个 warp 上（intra-edge 并行），所以对这类负载
+能拿到 100–275× 的加速。换言之，CPU 16t/1t 的"难看"扩展比，恰恰是 GPU 高加速比
+**成立且诚实**的原因——不是 CPU 基线没开并行，而是 batch_all 的并行粒度（inter-edge）
+和重查询的负载形态（intra-edge 爆炸）根本不匹配。
+
+> **加速比对比的口径**：报告 GPU 加速比时应同时给出 vs CPU-1t 和 vs CPU-16t
+> 两个数。重查询上二者差距不大（16t 没加速），但用 16t 作基线更公平、更保守。
+
+### 4.5 能否用 work-stealing 救场？（现状与可行性）
+
+要打破热边瓶颈，需要 **intra-edge work-stealing**：把单条热边的枚举递归树
+切成可被空闲线程偷走的子任务。代码库里这件事**已经起了头，但尚未接入 batch_all**：
+
+| 组件 | 位置 | 状态 |
+|------|------|------|
+| `steal_queue_`（TBB concurrent_queue） | `parallel_graphflow.h:44` | ✅ 已有 |
+| `FindMatches_local_ws`（候选数≥8 时把 candidates[1..] 推入队列） | `parallel_graphflow.cpp:2106` | ✅ 已实现 |
+| `FindMatches_local_splitting`（子树分裂版） | `parallel_graphflow.cpp:2202` | ✅ 已实现 |
+| steal_queue 消费端（OMP 区 Phase 2 `try_pop` 抽干队列） | `parallel_graphflow.cpp:1388` | ✅ 已实现，但挂在另一条 `FindMatches` 路径 |
+| **接入 batch_all 的 `EnumerateNewEdge`** | Phase 4 | ❌ **未接入**——仍调串行 `FindMatches_local` |
+
+此外 `versioned` 模式（`BatchUpdates_Versioned`）已经把 Phase 4 从 `parallel for`
+改成 **`#pragma omp task`**（`inter_executor.cpp:1575`），注释明确点出动机：
+
+> *"With `parallel for` the threads stay locked on their for-iterations and
+> cannot help drain a single hot edge's huge first-layer fanout."*
+
+但 GraphFlow 的 `EnumerateNewEdgeVersioned` 内部仍调**串行** `FindMatches_versioned`
+（无 hot-edge 拆分）；真正做了 hot-edge fan-out 子任务的只有 **TurboFlux**。
+所以对 **GraphFlow 重查询，切到 versioned 也救不了**。
+
+**可行性结论**：work-stealing 在本框架里**可行且已有半成品**，落地路径清晰——
+把 batch_all Phase 4 的 `EnumerateNewEdge` 改用 `omp task` 分发，并让其内部递归
+走 `FindMatches_local_ws`（生产 steal 任务）+ 团队线程消费 `steal_queue_`。
+预期能把 Q_69 这类查询的 CPU-16t 扩展从 1.12× 拉向接近线性。**风险点**：
+(1) 每个 steal 任务要快照整个 `m` 向量（内存/拷贝开销，需阈值调优）；
+(2) `local_vec_visited_local` 的 per-thread visited 状态需在偷取时正确重建
+（现有消费端已用 `m` 重建，逻辑可复用）；(3) 需重新校验匹配数正确性。
+这是一项独立优化，**不影响当前 GPU 加速比结论**——只会让 CPU 基线更强、
+让 GPU/CPU 的对比更硬核。
+
 ## 5. 使用方式
 
 ### 5.1 csm binary（GraphFlow / TurboFlux / SymBi）

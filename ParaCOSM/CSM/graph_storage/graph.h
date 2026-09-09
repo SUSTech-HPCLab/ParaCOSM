@@ -25,11 +25,11 @@ class Edge{
         Edge(uint v1Label, uint v2Label, uint eLabel):v1Label(v1Label),v2Label(v2Label),eLabel(eLabel){}
         bool GetExist(){return this->exist;}
         void EdgeDelete(){this->exist = false;}
-        const uint GetV1() const{return this->v1;}
-        const uint GetV2() const{return this->v2;}
-        const uint GetV1Label() const{return this->v1Label;}
-        const uint GetV2Label() const{return this->v2Label;}
-        const uint GeteLabel() const{return this->eLabel;}
+        uint GetV1() const{return this->v1;}
+        uint GetV2() const{return this->v2;}
+        uint GetV1Label() const{return this->v1Label;}
+        uint GetV2Label() const{return this->v2Label;}
+        uint GeteLabel() const{return this->eLabel;}
         uint GetIndex(){return this->index;}
         bool operator == (const Edge& edge)const {
             if((edge.v1Label == this->v1Label && edge.v2Label == this->v2Label && edge.eLabel == this->eLabel) ||

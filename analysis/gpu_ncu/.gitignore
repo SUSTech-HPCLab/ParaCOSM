@@ -1,0 +1,5 @@
+# Nsight Compute binary reports and rendered plots are large profiling
+# artifacts — keep the markdown analysis and the small CSV/JSON/stdout evidence,
+# but not the multi-MB binaries (regenerate with `sudo ncu ...`).
+*.ncu-rep
+*.png

@@ -324,7 +324,6 @@ __global__ void gpu_search_kernel(
         m[j] = vv_m[idx * Q + j];
     }
 
-    uint32_t v3 = vv_v[idx];       // Layer 1 candidate (already in m)
     uint32_t u_min3 = vv_umin[idx];
     uint32_t u_min_label3 = vv_ulabel[idx];
     uint32_t i2 = vv_i[idx];

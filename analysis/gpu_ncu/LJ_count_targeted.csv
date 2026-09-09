@@ -1,0 +1,46 @@
+----------- Loading graphs ------------
+# vertices = 9
+# edges = 9
+# vertices = 4847571
+# edges = 38566113
+Load Graphs: 53906.1ms
+------------ Preprocessing ------------
+matching order: 
+-vertex(backward neighbors)-
+#0: 7-5(7)-0(5)-2(5)-3(7)-8(3,7)-1(0)-4(7)-6(2)
+#1: 0-5(0)-7(5)-2(5)-3(7)-8(3,7)-1(0)-4(7)-6(2)
+#2: 2-5(2)-7(5)-0(5)-3(7)-8(3,7)-1(0)-4(7)-6(2)
+#3: 3-7(3)-8(3,7)-5(7)-0(5)-2(5)-1(0)-4(7)-6(2)
+#4: 8-3(8)-7(3,8)-5(7)-0(5)-2(5)-1(0)-4(7)-6(2)
+#5: 8-7(8)-3(7,8)-5(7)-0(5)-2(5)-1(0)-4(7)-6(2)
+#6: 1-0(1)-5(0)-7(5)-2(5)-3(7)-8(3,7)-4(7)-6(2)
+#7: 4-7(4)-5(7)-0(5)-2(5)-3(7)-8(3,7)-1(0)-6(2)
+#8: 6-2(6)-5(2)-7(5)-0(5)-3(7)-8(3,7)-1(0)-4(7)
+
+Preprocessing: 4.222ms
+--------- Incremental Matching --------
+auto_tuning on:1
+==PROF== Connected to process 225786 (/home/v-haibinlai/haibin/ParaCOSM/ParaCOSM/CSM/build/bin/csm)
+[BFS] CSR built: V=4847571, E=77132616, 41651.0ms
+[BFS] Buffers allocated: 3 x 15258MB (max 400M partial matches)
+[BFS] Init: 3510 tasks → 0 partial matches (14084.6ms)
+[GPU-BFS] Complete:
+  classify:    4.582 ms
+  add edges:   0.318 ms (195 unsafe)
+  build CSR:   375898 ms
+  BFS search:  74821.3 ms (0 matches)
+  total time:  450725 ms
+Incremental Matching: 450725ms
+0 vertex updates.
+10000 edge updates.
+195 unsafe updates.
+0 positive matches.
+0 negative matches.
+
+# edges in index in total: 0
+# vertices in index in total: 0
+Peak Virtual Memory: 11474908 KB
+
+----------------- End -----------------
+==PROF== Disconnected from process 225786
+==WARNING== No kernels were profiled.

@@ -135,7 +135,9 @@ target_link_libraries(csm PRIVATE
     CUDA::cudart
 )
 
-# Allow .cu files to include project headers
+# CUDA files need TBB include (include_directories only applies to CXX with icpx)
+target_include_directories(csm PRIVATE ${TBB_INC})
+
 set_source_files_properties(core/gpu/gpu_classifier.cu PROPERTIES
     COMPILE_OPTIONS "-O3"
 )
