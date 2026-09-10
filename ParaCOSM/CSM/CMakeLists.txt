@@ -1,20 +1,12 @@
 cmake_minimum_required(VERSION 3.16)
 
 # -----------------------------
-# 1. Set Intel oneAPI compiler
-# -----------------------------
-set(ONEAPI_ROOT $ENV{HOME}/intel/oneapi)
-set(INTEL_COMPILER_ROOT ${ONEAPI_ROOT}/compiler/2025.3)
-set(CMAKE_CXX_COMPILER ${INTEL_COMPILER_ROOT}/bin/icpx)
-set(CMAKE_LINKER ${INTEL_COMPILER_ROOT}/bin/icpx)
-
-# -----------------------------
-# 2. Project declaration (CXX + CUDA)
+# 1. Project declaration (CXX + CUDA)
 # -----------------------------
 project(CSM LANGUAGES CXX CUDA)
 
 # -----------------------------
-# 3. Compilation options
+# 2. Compilation options
 # -----------------------------
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -22,54 +14,27 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # CUDA settings
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
-set(CMAKE_CUDA_ARCHITECTURES 80)  # A100
-
-# Common optimizations and warnings (CXX only)
-add_compile_options(
-    $<$<COMPILE_LANGUAGE:CXX>:-g>
-    $<$<COMPILE_LANGUAGE:CXX>:-O3>
-    $<$<COMPILE_LANGUAGE:CXX>:-Wall>
-    $<$<COMPILE_LANGUAGE:CXX>:-Wno-unused-command-line-argument>
-    $<$<COMPILE_LANGUAGE:CXX>:-qopenmp>
-)
-
-# -----------------------------
-# 4. Intel TBB paths
-# -----------------------------
-set(TBB_ROOT ${ONEAPI_ROOT}/tbb/latest)
-set(TBB_INC ${TBB_ROOT}/include)
-
-# Auto-detect TBB lib directory (different oneAPI versions use different layouts)
-if(EXISTS "${TBB_ROOT}/lib/intel64/gcc4.8")
-    set(TBB_LIB_DIR ${TBB_ROOT}/lib/intel64/gcc4.8)
-else()
-    set(TBB_LIB_DIR ${TBB_ROOT}/lib)
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+    # Build a portable binary for the machines used by the project:
+    # Volta V100 (sm_70) and Ampere A100 (sm_80). Users can override this with
+    # -DCMAKE_CUDA_ARCHITECTURES=<arch-list>.
+    set(CMAKE_CUDA_ARCHITECTURES "70;80" CACHE STRING
+        "CUDA architectures to build for (70=V100, 80=A100)")
 endif()
 
-include_directories(
-    ${TBB_INC}
-    ${CMAKE_SOURCE_DIR}
-    ${CMAKE_SOURCE_DIR}/external
-)
- 
-link_directories(${TBB_LIB_DIR})
-
 # -----------------------------
-# 5. OpenMP
+# 3. Dependencies
 # -----------------------------
+find_package(TBB REQUIRED)
 find_package(OpenMP REQUIRED)
-if(OpenMP_CXX_FOUND)
-    message(STATUS "Found OpenMP: ${OpenMP_CXX_FLAGS}")
-endif()
-
-# -----------------------------
-# 5b. CUDA Toolkit
-# -----------------------------
 find_package(CUDAToolkit REQUIRED)
-message(STATUS "Found CUDA Toolkit: ${CUDAToolkit_VERSION}")
+
+message(STATUS "C++ compiler: ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
+message(STATUS "CUDA Toolkit: ${CUDAToolkit_VERSION}")
+message(STATUS "CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
 
 # -----------------------------
-# 6. Source files
+# 4. Source files
 # -----------------------------
 set(MATCH matching_executor)
 set(UTILS utils)
@@ -125,26 +90,27 @@ set(SRC_FILES
 # -----------------------------
 add_executable(csm ${SRC_FILES})
 
+target_include_directories(csm PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/external
+)
+
+target_compile_options(csm PRIVATE
+    $<$<COMPILE_LANGUAGE:CXX>:-O3>
+    $<$<COMPILE_LANGUAGE:CXX>:-Wall>
+    $<$<COMPILE_LANGUAGE:CXX>:-Wno-unused-command-line-argument>
+    $<$<COMPILE_LANGUAGE:CUDA>:-O3>
+)
+
 # -----------------------------
 # 8. Link libraries
 # -----------------------------
 target_link_libraries(csm PRIVATE 
-    tbb
+    TBB::tbb
+    OpenMP::OpenMP_CXX
     pthread
-    iomp5   # Intel OpenMP runtime
     CUDA::cudart
 )
-
-# CUDA files need TBB include (include_directories only applies to CXX with icpx)
-target_include_directories(csm PRIVATE ${TBB_INC})
-
-set_source_files_properties(core/gpu/gpu_classifier.cu PROPERTIES
-    COMPILE_OPTIONS "-O3"
-)
-
-# Set rpath so runtime can find Intel OpenMP libraries
-set(INTEL_OPENMP_LIB_DIR ${INTEL_COMPILER_ROOT}/lib)
-target_link_options(csm PRIVATE "-Wl,-rpath,${INTEL_OPENMP_LIB_DIR}")
 
 # -----------------------------
 # 9. Standalone CaLiG executable
@@ -155,10 +121,8 @@ add_executable(parallel_calig
 
 target_link_libraries(parallel_calig PRIVATE 
     pthread
-    iomp5
+    OpenMP::OpenMP_CXX
 )
-
-target_link_options(parallel_calig PRIVATE "-Wl,-rpath,${INTEL_OPENMP_LIB_DIR}")
 
 
 add_executable(calig
@@ -167,10 +131,8 @@ add_executable(calig
 
 target_link_libraries(calig PRIVATE 
     pthread
-    iomp5
+    OpenMP::OpenMP_CXX
 )
-
-target_link_options(calig PRIVATE "-Wl,-rpath,${INTEL_OPENMP_LIB_DIR}")
 
 
 
@@ -199,10 +161,8 @@ target_include_directories(parallel_newsp PRIVATE
 
 target_link_libraries(parallel_newsp PRIVATE
     pthread
-    iomp5
+    OpenMP::OpenMP_CXX
 )
-
-target_link_options(parallel_newsp PRIVATE "-Wl,-rpath,${INTEL_OPENMP_LIB_DIR}")
 
 
 ### -----------------------------

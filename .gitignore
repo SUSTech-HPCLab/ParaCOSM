@@ -2,8 +2,10 @@
 Test_Learn_Experiment/
 .o
 build
+build-*/
 .DS_store
 .vscode/
+__pycache__/
 
 .zip
 *.zip
@@ -17,3 +19,21 @@ build
 *.gz
 # data/*
 *.graph
+
+# Keep raw screening logs/results local; retain only the consolidated,
+# correctness-verified Amazon query set.
+ParaCOSM/CSM/generated_gpu_speedup_queries/*
+!ParaCOSM/CSM/generated_gpu_speedup_queries/amazon_verified_unique/
+!ParaCOSM/CSM/generated_gpu_speedup_queries/amazon_verified_unique/README.md
+!ParaCOSM/CSM/generated_gpu_speedup_queries/amazon_verified_unique/manifest.csv
+!ParaCOSM/CSM/generated_gpu_speedup_queries/amazon_verified_unique/queries/
+!ParaCOSM/CSM/generated_gpu_speedup_queries/amazon_verified_unique/queries/*.graph
+
+# Keep the resumable 8--12 vertex collection's verified outputs, but not its
+# round-by-round candidates, logs, seeds, or process state.
+!ParaCOSM/CSM/generated_gpu_speedup_queries/amazon_auto_50/
+ParaCOSM/CSM/generated_gpu_speedup_queries/amazon_auto_50/*
+!ParaCOSM/CSM/generated_gpu_speedup_queries/amazon_auto_50/manifest.csv
+!ParaCOSM/CSM/generated_gpu_speedup_queries/amazon_auto_50/queries/
+ParaCOSM/CSM/generated_gpu_speedup_queries/amazon_auto_50/queries/*
+!ParaCOSM/CSM/generated_gpu_speedup_queries/amazon_auto_50/queries/*.graph

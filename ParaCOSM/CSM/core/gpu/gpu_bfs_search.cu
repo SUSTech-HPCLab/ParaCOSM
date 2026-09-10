@@ -5,16 +5,29 @@
 #include <cstring>
 #include <chrono>
 #include <algorithm>
+#include <cstdlib>
 #include <stdexcept>
 #include <string>
 #include <omp.h>
 
-#define CUDA_CHECK(call)                                                       \
+static inline void cuda_check_or_throw(cudaError_t error, const char* file, int line) {
+    if (error == cudaSuccess) return;
+    throw std::runtime_error(std::string("CUDA error at ") + file + ":" +
+                             std::to_string(line) + ": " +
+                             cudaGetErrorString(error));
+}
+
+#define CUDA_CHECK(call) cuda_check_or_throw((call), __FILE__, __LINE__)
+
+// Destructors must not throw, especially while unwinding a CUDA failure.
+#define CUDA_FREE_NOEXCEPT(pointer)                                            \
     do {                                                                       \
-        cudaError_t err = (call);                                              \
-        if (err != cudaSuccess) {                                              \
-            fprintf(stderr, "CUDA error at %s:%d: %s\n", __FILE__, __LINE__,  \
-                    cudaGetErrorString(err));                                   \
+        if (pointer) {                                                         \
+            cudaError_t error = cudaFree(pointer);                             \
+            if (error != cudaSuccess)                                          \
+                fprintf(stderr, "CUDA cleanup error: %s\n",                   \
+                        cudaGetErrorString(error));                             \
+            pointer = nullptr;                                                 \
         }                                                                      \
     } while (0)
 
@@ -1062,6 +1075,132 @@ __global__ void bfs_count_versioned_kernel(
     }
 }
 
+// Versioned counterpart of the final-two-level fusion. The partial-match
+// timestamp cap is applied to the pivot edge and every join edge at both
+// depths, so this is semantically identical to expand_versioned followed by
+// count_versioned without materialising the often enormous Q-1 frontier.
+__global__ void bfs_expand_count_versioned_kernel(
+    const uint32_t* __restrict__ csr_offsets,
+    const uint32_t* __restrict__ csr_neighbors,
+    const uint32_t* __restrict__ csr_elabels,
+    const uint32_t* __restrict__ csr_timestamps,
+    const uint32_t* __restrict__ vlabels,
+    const uint32_t* __restrict__ all_orders,
+    const uint32_t* __restrict__ in_buf,
+    uint32_t in_count,
+    uint64_t* __restrict__ result_count,
+    uint32_t depth,
+    uint32_t Q
+) {
+    uint64_t gtid = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    uint32_t warp_id = (uint32_t)(gtid >> 5);
+    uint32_t lane = (uint32_t)(gtid & 31u);
+    if (warp_id >= in_count) return;
+
+    uint32_t stride = Q + 2;
+    const uint32_t* pm = in_buf + (size_t)warp_id * stride;
+    uint32_t order_idx = pm[0];
+    uint32_t max_ts = pm[1];
+    const uint32_t* m = pm + 2;
+    const uint32_t* order = all_orders + order_idx * Q;
+    uint32_t u = order[depth];
+    uint32_t u2 = order[depth + 1];
+
+    uint32_t qs = bfs_q_offsets[u], qe = bfs_q_offsets[u + 1];
+    uint32_t u_min = UINT32_MAX, u_min_label = 0, u_min_deg = UINT32_MAX;
+    for (uint32_t j = qs; j < qe; j++) {
+        uint32_t uo = bfs_q_neighbors[j];
+        if (m[uo] == UINT32_MAX) continue;
+        uint32_t deg = csr_offsets[m[uo] + 1] - csr_offsets[m[uo]];
+        if (deg < u_min_deg) {
+            u_min_deg = deg; u_min = uo; u_min_label = bfs_q_elabels[j];
+        }
+    }
+    if (u_min == UINT32_MAX) return;
+
+    uint32_t nbr_start = csr_offsets[m[u_min]];
+    uint32_t nbr_count = csr_offsets[m[u_min] + 1] - nbr_start;
+    uint32_t q2s = bfs_q_offsets[u2], q2e = bfs_q_offsets[u2 + 1];
+    uint64_t local_count = 0;
+
+    for (uint32_t i = lane; i < nbr_count; i += 32) {
+        if (csr_timestamps[nbr_start + i] > max_ts) continue;
+        uint32_t v = csr_neighbors[nbr_start + i];
+        if (vlabels[v] != bfs_q_vlabels[u] ||
+            csr_elabels[nbr_start + i] != u_min_label) continue;
+
+        bool joinable = true;
+        for (uint32_t j = qs; j < qe; j++) {
+            uint32_t uo = bfs_q_neighbors[j];
+            if (m[uo] == UINT32_MAX || uo == u_min) continue;
+            uint32_t s = csr_offsets[m[uo]];
+            uint32_t nc = csr_offsets[m[uo] + 1] - s;
+            int pos = bfs_bsearch(csr_neighbors + s, nc, v);
+            if (pos < 0 || csr_elabels[s + pos] != bfs_q_elabels[j] ||
+                csr_timestamps[s + pos] > max_ts) {
+                joinable = false; break;
+            }
+        }
+        if (!joinable) continue;
+        bool visited = false;
+        for (uint32_t d = 0; d < Q; d++) {
+            if (m[d] == v) { visited = true; break; }
+        }
+        if (visited) continue;
+
+        uint32_t u2_min = UINT32_MAX, u2_min_label = 0, u2_min_deg = UINT32_MAX;
+        for (uint32_t j = q2s; j < q2e; j++) {
+            uint32_t uo = bfs_q_neighbors[j];
+            uint32_t mapped = (uo == u) ? v : m[uo];
+            if (mapped == UINT32_MAX) continue;
+            uint32_t deg = csr_offsets[mapped + 1] - csr_offsets[mapped];
+            if (deg < u2_min_deg) {
+                u2_min_deg = deg; u2_min = uo; u2_min_label = bfs_q_elabels[j];
+            }
+        }
+        if (u2_min == UINT32_MAX) continue;
+
+        uint32_t mapped_min = (u2_min == u) ? v : m[u2_min];
+        uint32_t ns2 = csr_offsets[mapped_min];
+        uint32_t nc2 = csr_offsets[mapped_min + 1] - ns2;
+        for (uint32_t k = 0; k < nc2; k++) {
+            if (csr_timestamps[ns2 + k] > max_ts) continue;
+            uint32_t w = csr_neighbors[ns2 + k];
+            if (vlabels[w] != bfs_q_vlabels[u2] ||
+                csr_elabels[ns2 + k] != u2_min_label) continue;
+
+            bool final_joinable = true;
+            for (uint32_t j = q2s; j < q2e; j++) {
+                uint32_t uo = bfs_q_neighbors[j];
+                if (uo == u2_min) continue;
+                uint32_t mapped = (uo == u) ? v : m[uo];
+                if (mapped == UINT32_MAX) continue;
+                uint32_t s = csr_offsets[mapped];
+                uint32_t nc = csr_offsets[mapped + 1] - s;
+                int pos = bfs_bsearch(csr_neighbors + s, nc, w);
+                if (pos < 0 || csr_elabels[s + pos] != bfs_q_elabels[j] ||
+                    csr_timestamps[s + pos] > max_ts) {
+                    final_joinable = false; break;
+                }
+            }
+            if (!final_joinable) continue;
+            bool final_visited = (w == v);
+            if (!final_visited) {
+                for (uint32_t d = 0; d < Q; d++) {
+                    if (m[d] == w) { final_visited = true; break; }
+                }
+            }
+            if (!final_visited) local_count++;
+        }
+    }
+
+    local_count = warp_reduce_add_u64(local_count);
+    if (lane == 0 && local_count > 0) {
+        atomicAdd(reinterpret_cast<unsigned long long*>(result_count),
+                  static_cast<unsigned long long>(local_count));
+    }
+}
+
 // ============================================================
 // Host implementation
 // ============================================================
@@ -1354,17 +1493,42 @@ void GPUBFSSearch::EnsureEdgesCapacity(size_t n) {
     CUDA_CHECK(cudaMalloc(&d_edges_max_ts_, edges_capacity_ * sizeof(uint32_t)));
 }
 
-void GPUBFSSearch::EnsureBufCapacity(uint32_t q) {
+void GPUBFSSearch::EnsureBufCapacity(uint32_t q, bool versioned) {
     if (d_buf_a_) return;  // already allocated
-    size_t stride = q + 1;
-    size_t buf_bytes = MAX_BUF_MATCHES * stride * sizeof(uint32_t);
+    const size_t stride = q + (versioned ? 2 : 1);
+
+    size_t requested = ABSOLUTE_MAX_BUF_MATCHES;
+    if (const char* env = std::getenv("GPU_BFS_MAX_MATCHES")) {
+        char* end = nullptr;
+        unsigned long long parsed = std::strtoull(env, &end, 10);
+        if (end != env && *end == '\0' && parsed > 0) {
+            requested = std::min<size_t>(static_cast<size_t>(parsed),
+                                         ABSOLUTE_MAX_BUF_MATCHES);
+        } else {
+            fprintf(stderr, "[BFS] Ignoring invalid GPU_BFS_MAX_MATCHES=%s\n", env);
+        }
+    }
+
+    size_t free_bytes = 0, total_bytes = 0;
+    CUDA_CHECK(cudaMemGetInfo(&free_bytes, &total_bytes));
+    // Use at most 70% of currently free memory for the three frontiers. The
+    // remainder is needed by the CSR, query state, CUDA context, and kernels.
+    const size_t bytes_per_match = 3 * stride * sizeof(uint32_t);
+    const size_t memory_cap = (free_bytes / 10 * 7) / bytes_per_match;
+    max_buf_matches_ = std::min(requested, memory_cap);
+    if (max_buf_matches_ < 1024) {
+        throw std::runtime_error("GPUBFSSearch: insufficient free GPU memory for BFS buffers");
+    }
+
+    size_t buf_bytes = max_buf_matches_ * stride * sizeof(uint32_t);
     CUDA_CHECK(cudaMalloc(&d_buf_a_, buf_bytes));
     CUDA_CHECK(cudaMalloc(&d_buf_b_, buf_bytes));
     CUDA_CHECK(cudaMalloc(&d_buf_c_, buf_bytes));  // third buffer for overflow flush
     CUDA_CHECK(cudaMalloc(&d_count_, sizeof(uint64_t)));
     CUDA_CHECK(cudaMalloc(&d_result_, sizeof(uint64_t)));
-    printf("[BFS] Buffers allocated: 3 x %zuMB (max %zuM partial matches)\n",
-           buf_bytes / (1024*1024), MAX_BUF_MATCHES / 1000000);
+    printf("[BFS] Buffers allocated: 3 x %zuMB (max %zuM partial matches, %.0f%% of free memory)\n",
+           buf_bytes / (1024*1024), max_buf_matches_ / 1000000,
+           free_bytes ? (300.0 * buf_bytes / free_bytes) : 0.0);
 }
 
 // ---------------------------------------------------------------------------
@@ -1389,13 +1553,76 @@ void GPUBFSSearch::BFSFromDepth(uint32_t* in_buf, uint32_t in_count,
     for (uint32_t depth = start_depth; depth < Q; depth++) {
         bool is_last = (depth == Q - 1);
 
+        // Versioned three-level tail: stream chunks of the Q-3 frontier into
+        // the materialised Q-2 buffer, then immediately run the timestamp-aware
+        // final-two-level fusion. This bounds memory even when one update edge
+        // creates more than a full buffer at depth Q-2.
+        if (versioned && depth == Q - 3 && Q >= 4) {
+            uint32_t in_processed = 0;
+            while (in_processed < cur_count) {
+                uint32_t chunk = cur_count - in_processed;
+                uint32_t max_chunk = static_cast<uint32_t>(max_buf_matches_ / 2);
+                if (chunk > max_chunk) chunk = max_chunk;
+                uint64_t out_count = 0;
+
+                while (true) {
+                    CUDA_CHECK(cudaMemcpy(d_count_, &zero64, sizeof(uint64_t),
+                                          cudaMemcpyHostToDevice));
+                    grid = (uint32_t)(((uint64_t)chunk * 32 + block - 1) / block);
+                    bfs_expand_versioned_kernel<<<grid, block>>>(
+                        d_csr_offsets_, d_csr_neighbors_, d_csr_elabels_,
+                        d_csr_timestamps_, d_vlabels_, d_all_orders_,
+                        cur_buf + (size_t)in_processed * stride, chunk,
+                        next_buf, d_count_, depth, Q,
+                        static_cast<uint32_t>(max_buf_matches_)
+                    );
+                    CUDA_CHECK(cudaGetLastError());
+                    CUDA_CHECK(cudaDeviceSynchronize());
+                    CUDA_CHECK(cudaMemcpy(&out_count, d_count_, sizeof(uint64_t),
+                                          cudaMemcpyDeviceToHost));
+                    if (out_count <= max_buf_matches_) break;
+                    if (chunk == 1) {
+                        throw GPUBFSBufferOverflow(
+                            "one partial match exceeds the GPU BFS frontier buffer");
+                    }
+                    chunk /= 2;
+                }
+
+                uint32_t written = static_cast<uint32_t>(out_count);
+                if (written) {
+                    grid = (uint32_t)(((uint64_t)written * 32 + block - 1) / block);
+                    bfs_expand_count_versioned_kernel<<<grid, block>>>(
+                        d_csr_offsets_, d_csr_neighbors_, d_csr_elabels_,
+                        d_csr_timestamps_, d_vlabels_, d_all_orders_, next_buf,
+                        written, d_result_, depth + 1, Q
+                    );
+                    CUDA_CHECK(cudaGetLastError());
+                    CUDA_CHECK(cudaDeviceSynchronize());
+                }
+                in_processed += chunk;
+            }
+            printf("[BFS-V] Stream-fused depth %u->%u->%u: %u input pm\n",
+                   depth, depth + 1, depth + 2, cur_count);
+            break;
+        }
+
         // OPT(P1b): fuse the last two depths. At depth Q-2, instead of
         // materialising the (largest) depth-(Q-1) layer and then counting it,
         // extend each candidate in-register to depth Q-1 and count directly.
-        // Only for the non-versioned compact/padded path; versioned keeps the
-        // explicit two-kernel flow (timestamp logic).
-        if (!versioned && depth == Q - 2 && Q >= 3) {
+        if (depth == Q - 2 && Q >= 3) {
             grid = (uint32_t)(((uint64_t)cur_count * 32 + block - 1) / block);
+            if (versioned) {
+                bfs_expand_count_versioned_kernel<<<grid, block>>>(
+                    d_csr_offsets_, d_csr_neighbors_, d_csr_elabels_,
+                    d_csr_timestamps_, d_vlabels_, d_all_orders_, cur_buf,
+                    cur_count, d_result_, depth, Q
+                );
+                CUDA_CHECK(cudaGetLastError());
+                printf("[BFS-V] Fused depth %u->%u (timestamp-aware count, no materialise): %u input pm\n",
+                       depth, depth + 1, cur_count);
+                break;
+            }
+
             // Env GPU_BFS_LJ_V2 selects the OUTER-parallel v2 (default off → keep
             // the validated v1 inner-parallel kernel). Read once, cached. Declared
             // here (not inside the sparse branch) so the tag print below can read it.
@@ -1453,7 +1680,7 @@ void GPUBFSSearch::BFSFromDepth(uint32_t* in_buf, uint32_t in_count,
 
             while (in_processed < cur_count) {
                 uint32_t chunk = cur_count - in_processed;
-                uint32_t max_chunk = static_cast<uint32_t>(MAX_BUF_MATCHES / 2);
+                uint32_t max_chunk = static_cast<uint32_t>(max_buf_matches_ / 2);
                 if (chunk > max_chunk) chunk = max_chunk;
 
                 bool overflow;
@@ -1467,7 +1694,7 @@ void GPUBFSSearch::BFSFromDepth(uint32_t* in_buf, uint32_t in_count,
                             d_vlabels_, d_all_orders_,
                             cur_buf + (size_t)in_processed * stride, chunk,
                             next_buf + (size_t)total_out * stride, d_count_,
-                            depth, Q, static_cast<uint32_t>(MAX_BUF_MATCHES - total_out)
+                            depth, Q, static_cast<uint32_t>(max_buf_matches_ - total_out)
                         );
                     } else {
                         bfs_expand_kernel<<<grid, block>>>(
@@ -1475,14 +1702,14 @@ void GPUBFSSearch::BFSFromDepth(uint32_t* in_buf, uint32_t in_count,
                             d_degrees_, d_all_orders_,
                             cur_buf + (size_t)in_processed * stride, chunk,
                             next_buf + (size_t)total_out * stride, d_count_,
-                            depth, Q, static_cast<uint32_t>(MAX_BUF_MATCHES - total_out)
+                            depth, Q, static_cast<uint32_t>(max_buf_matches_ - total_out)
                         );
                     }
                     CUDA_CHECK(cudaGetLastError());
                     CUDA_CHECK(cudaDeviceSynchronize());
 
                     CUDA_CHECK(cudaMemcpy(&out_count, d_count_, sizeof(uint64_t), cudaMemcpyDeviceToHost));
-                    overflow = ((uint64_t)total_out + out_count > MAX_BUF_MATCHES);
+                    overflow = ((uint64_t)total_out + out_count > max_buf_matches_);
                     if (overflow && chunk > 1) {
                         chunk = chunk / 2;
                     } else {
@@ -1491,25 +1718,13 @@ void GPUBFSSearch::BFSFromDepth(uint32_t* in_buf, uint32_t in_count,
                 } while (true);
 
                 if (overflow) {
-                    if (chunk == 1 && total_out == 0) {
-                        // Single partial match overflows — its emitters were written up to
-                        // MAX_BUF_MATCHES (rest dropped by the kernel's slot<max_out guard).
-                        uint32_t written = static_cast<uint32_t>(std::min(out_count, (uint64_t)MAX_BUF_MATCHES));
-                        if (written > 0) {
-                            printf("[BFS%s] Single-item overflow at depth %u->%u (%u/%llu outputs), flush\n",
-                                   versioned ? "-V" : "", depth, depth+1, written,
-                                   (unsigned long long)out_count);
-                            BFSFromDepth(next_buf, written, d_buf_c_, depth + 1, Q, stride, versioned);
-                        }
-                        total_out = 0;
-                    } else {
-                        // Multi-item overflow — flush the buffer-full prefix and continue.
-                        total_out = MAX_BUF_MATCHES;
-                        printf("[BFS%s] Flush %u partials at depth %u->%u (overflow, chunk=%u)\n",
-                               versioned ? "-V" : "", total_out, depth, depth+1, chunk);
-                        BFSFromDepth(next_buf, total_out, d_buf_c_, depth + 1, Q, stride, versioned);
-                        total_out = 0;
-                    }
+                    // Recursive flush needs one live frontier buffer per nested
+                    // level. With only three buffers it can alias a parent's
+                    // input on deep queries, producing duplicates or illegal
+                    // accesses. Abort this edge batch cleanly; the caller will
+                    // halve it and retry from scratch.
+                    throw GPUBFSBufferOverflow(
+                        "GPU BFS frontier exceeds buffer; retry a smaller edge batch");
                 } else {
                     total_out += static_cast<uint32_t>(out_count);
                 }
@@ -1565,13 +1780,13 @@ uint64_t GPUBFSSearch::SearchBatchEdgesBFS(
         d_vlabels_, d_edges_v1_, d_edges_v2_, d_edges_label_,
         d_all_orders_, d_buf_a_, d_count_,
         num_edges_data, num_query_edges, Q,
-        static_cast<uint32_t>(MAX_BUF_MATCHES)
+        static_cast<uint32_t>(max_buf_matches_)
     );
     CUDA_CHECK(cudaGetLastError());
 
     uint64_t cur_count64 = 0;
     CUDA_CHECK(cudaMemcpy(&cur_count64, d_count_, sizeof(uint64_t), cudaMemcpyDeviceToHost));
-    uint32_t cur_count = static_cast<uint32_t>(std::min(cur_count64, (uint64_t)MAX_BUF_MATCHES));
+    uint32_t cur_count = static_cast<uint32_t>(std::min(cur_count64, (uint64_t)max_buf_matches_));
 
     auto t_init = std::chrono::high_resolution_clock::now();
     double init_ms = std::chrono::duration_cast<std::chrono::microseconds>(t_init - t_start).count() / 1000.0;
@@ -1613,16 +1828,7 @@ uint64_t GPUBFSSearch::SearchBatchEdgesBFS_Versioned(
     uint32_t stride = Q + 2;  // order_idx + max_ts + m[0..Q-1]
 
     EnsureEdgesCapacity(num_edges_data);
-
-    // Allocate versioned BFS buffers (stride = Q+2, not Q+1)
-    size_t buf_bytes = MAX_BUF_MATCHES * stride * sizeof(uint32_t);
-    if (!d_buf_a_) {
-        CUDA_CHECK(cudaMalloc(&d_buf_a_, buf_bytes));
-        CUDA_CHECK(cudaMalloc(&d_buf_b_, buf_bytes));
-        CUDA_CHECK(cudaMalloc(&d_buf_c_, buf_bytes));
-        CUDA_CHECK(cudaMalloc(&d_count_, sizeof(uint32_t)));
-        CUDA_CHECK(cudaMalloc(&d_result_, sizeof(uint64_t)));
-    }
+    EnsureBufCapacity(Q, true);
 
     // Copy edges + timestamps
     CUDA_CHECK(cudaMemcpy(d_edges_v1_, edges_v1, num_edges_data*sizeof(uint32_t), cudaMemcpyHostToDevice));
@@ -1649,13 +1855,13 @@ uint64_t GPUBFSSearch::SearchBatchEdgesBFS_Versioned(
         d_vlabels_, d_edges_v1_, d_edges_v2_, d_edges_label_, d_edges_max_ts_,
         d_all_orders_, d_buf_a_, d_count_,
         num_edges_data, num_query_edges, Q,
-        static_cast<uint32_t>(MAX_BUF_MATCHES)
+        static_cast<uint32_t>(max_buf_matches_)
     );
     CUDA_CHECK(cudaGetLastError());
 
     uint64_t cur_count64 = 0;
     CUDA_CHECK(cudaMemcpy(&cur_count64, d_count_, sizeof(uint64_t), cudaMemcpyDeviceToHost));
-    uint32_t cur_count = static_cast<uint32_t>(std::min(cur_count64, (uint64_t)MAX_BUF_MATCHES));
+    uint32_t cur_count = static_cast<uint32_t>(std::min(cur_count64, (uint64_t)max_buf_matches_));
 
     auto t_init = std::chrono::high_resolution_clock::now();
     printf("[BFS-V] Init: %u tasks → %u partial matches (%.1fms)\n",
@@ -1711,13 +1917,13 @@ uint64_t GPUBFSSearch::SearchSingleEdgeBFS(
         d_vlabels_, d_edges_v1_, d_edges_v2_, d_edges_label_,
         d_all_orders_, d_buf_a_, d_count_,
         1, num_query_edges, Q,
-        static_cast<uint32_t>(MAX_BUF_MATCHES)
+        static_cast<uint32_t>(max_buf_matches_)
     );
     CUDA_CHECK(cudaGetLastError());
 
     uint64_t cc64 = 0;
     CUDA_CHECK(cudaMemcpy(&cc64, d_count_, sizeof(uint64_t), cudaMemcpyDeviceToHost));
-    uint32_t cur_count = static_cast<uint32_t>(std::min(cc64, (uint64_t)MAX_BUF_MATCHES));
+    uint32_t cur_count = static_cast<uint32_t>(std::min(cc64, (uint64_t)max_buf_matches_));
     if (cur_count == 0) return 0;
 
     // ---- BFS levels ----
@@ -1743,14 +1949,14 @@ uint64_t GPUBFSSearch::SearchSingleEdgeBFS(
                 cur_buf, cur_count,
                 next_buf, d_count_,
                 depth, Q,
-                static_cast<uint32_t>(MAX_BUF_MATCHES)
+                static_cast<uint32_t>(max_buf_matches_)
             );
             CUDA_CHECK(cudaGetLastError());
             CUDA_CHECK(cudaDeviceSynchronize());
 
             uint64_t oc64 = 0;
             CUDA_CHECK(cudaMemcpy(&oc64, d_count_, sizeof(uint64_t), cudaMemcpyDeviceToHost));
-            uint32_t out_count = static_cast<uint32_t>(std::min(oc64, (uint64_t)MAX_BUF_MATCHES));
+            uint32_t out_count = static_cast<uint32_t>(std::min(oc64, (uint64_t)max_buf_matches_));
             if (out_count == 0) break;
 
             std::swap(cur_buf, next_buf);
@@ -1766,22 +1972,24 @@ uint64_t GPUBFSSearch::SearchSingleEdgeBFS(
 }
 
 void GPUBFSSearch::Destroy() {
-    if (d_csr_offsets_) { CUDA_CHECK(cudaFree(d_csr_offsets_)); d_csr_offsets_ = nullptr; }
-    if (d_csr_neighbors_) { CUDA_CHECK(cudaFree(d_csr_neighbors_)); d_csr_neighbors_ = nullptr; }
-    if (d_csr_elabels_) { CUDA_CHECK(cudaFree(d_csr_elabels_)); d_csr_elabels_ = nullptr; }
-    if (d_csr_timestamps_) { CUDA_CHECK(cudaFree(d_csr_timestamps_)); d_csr_timestamps_ = nullptr; }
-    if (d_vlabels_) { CUDA_CHECK(cudaFree(d_vlabels_)); d_vlabels_ = nullptr; }
-    if (d_degrees_) { CUDA_CHECK(cudaFree(d_degrees_)); d_degrees_ = nullptr; }
-    if (d_all_orders_) { CUDA_CHECK(cudaFree(d_all_orders_)); d_all_orders_ = nullptr; }
-    if (d_buf_a_) { CUDA_CHECK(cudaFree(d_buf_a_)); d_buf_a_ = nullptr; }
-    if (d_buf_b_) { CUDA_CHECK(cudaFree(d_buf_b_)); d_buf_b_ = nullptr; }
-    if (d_count_) { CUDA_CHECK(cudaFree(d_count_)); d_count_ = nullptr; }
-    if (d_result_) { CUDA_CHECK(cudaFree(d_result_)); d_result_ = nullptr; }
-    if (d_edges_v1_) { CUDA_CHECK(cudaFree(d_edges_v1_)); d_edges_v1_ = nullptr; }
-    if (d_edges_v2_) { CUDA_CHECK(cudaFree(d_edges_v2_)); d_edges_v2_ = nullptr; }
-    if (d_edges_label_) { CUDA_CHECK(cudaFree(d_edges_label_)); d_edges_label_ = nullptr; }
-    if (d_edges_max_ts_) { CUDA_CHECK(cudaFree(d_edges_max_ts_)); d_edges_max_ts_ = nullptr; }
+    CUDA_FREE_NOEXCEPT(d_csr_offsets_);
+    CUDA_FREE_NOEXCEPT(d_csr_neighbors_);
+    CUDA_FREE_NOEXCEPT(d_csr_elabels_);
+    CUDA_FREE_NOEXCEPT(d_csr_timestamps_);
+    CUDA_FREE_NOEXCEPT(d_vlabels_);
+    CUDA_FREE_NOEXCEPT(d_degrees_);
+    CUDA_FREE_NOEXCEPT(d_all_orders_);
+    CUDA_FREE_NOEXCEPT(d_buf_a_);
+    CUDA_FREE_NOEXCEPT(d_buf_b_);
+    CUDA_FREE_NOEXCEPT(d_buf_c_);
+    CUDA_FREE_NOEXCEPT(d_count_);
+    CUDA_FREE_NOEXCEPT(d_result_);
+    CUDA_FREE_NOEXCEPT(d_edges_v1_);
+    CUDA_FREE_NOEXCEPT(d_edges_v2_);
+    CUDA_FREE_NOEXCEPT(d_edges_label_);
+    CUDA_FREE_NOEXCEPT(d_edges_max_ts_);
     edges_capacity_ = 0;
+    max_buf_matches_ = 0;
     csr_built_ = false;
     query_set_ = false;
     padded_csr_ = false;

@@ -1,3 +1,5 @@
+#include <algorithm>
+#include <cstdlib>
 #include <vector>
 #include <atomic>
 #include <iostream>
@@ -1736,11 +1738,41 @@ void InterExecutor::BatchUpdates_GPU_BFS_Versioned(
         ets[i] = unsafe_edges[i].timestamp;
     }
 
-    uint64_t total_matches = gpu_bfs_search_.SearchBatchEdgesBFS_Versioned(
-        ev1.data(), ev2.data(), elab.data(), ets.data(),
-        static_cast<uint32_t>(unsafe_edges.size()),
-        num_query_edges, Q
-    );
+    // Bound each GPU invocation so a large update stream cannot create a
+    // frontier that needs unsafe recursive buffer aliasing. If a batch still
+    // exceeds the frontier capacity, retry that same range at half size.
+    size_t edge_batch_size = 4096;
+    if (const char* value = std::getenv("GPU_BFS_EDGE_BATCH_SIZE")) {
+        char* end = nullptr;
+        unsigned long long parsed = std::strtoull(value, &end, 10);
+        if (end != value && *end == '\0' && parsed > 0)
+            edge_batch_size = static_cast<size_t>(parsed);
+    }
+
+    uint64_t total_matches = 0;
+    size_t edge_offset = 0;
+    size_t gpu_batches = 0;
+    while (edge_offset < unsafe_edges.size()) {
+        size_t current_size = std::min(edge_batch_size,
+                                       unsafe_edges.size() - edge_offset);
+        try {
+            total_matches += gpu_bfs_search_.SearchBatchEdgesBFS_Versioned(
+                ev1.data() + edge_offset, ev2.data() + edge_offset,
+                elab.data() + edge_offset, ets.data() + edge_offset,
+                static_cast<uint32_t>(current_size), num_query_edges, Q
+            );
+            edge_offset += current_size;
+            gpu_batches++;
+        } catch (const GPUBFSBufferOverflow&) {
+            if (current_size == 1) throw;
+            edge_batch_size = std::max<size_t>(1, current_size / 2);
+            std::cout << "[BFS-V] frontier full; retry edge offset "
+                      << edge_offset << " with batch " << edge_batch_size
+                      << std::endl;
+        }
+    }
+    std::cout << "[BFS-V] edge batches: " << gpu_batches
+              << ", final batch size limit: " << edge_batch_size << std::endl;
 
     auto t8 = std::chrono::high_resolution_clock::now();
     double search_ms = std::chrono::duration_cast<std::chrono::microseconds>(t8 - t7).count() / 1000.0;

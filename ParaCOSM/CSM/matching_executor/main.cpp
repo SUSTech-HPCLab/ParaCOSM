@@ -296,7 +296,10 @@ int main(int argc, char *argv[])
     app.add_option("--orders", orders, "pre-defined matching orders");
     app.add_option("-t,--thread-num", thread_num, "Number of thread that program will use.");
     app.add_option("--auto-tuning", auto_tuning, "Framework will tune the thread number with query vertex");
-    app.add_option("-m,--update-mode", update_mode, "Update strategy: batch | batch2 | batch3 | batch4 | openmp | queue | single | persistent | batch_all");
+    app.add_option("-m,--update-mode", update_mode,
+        "Update strategy: batch | batch2 | batch3 | batch4 | openmp | queue | "
+        "single | persistent | batch_all | versioned | gpu | gpu_all | gpu_bfs | "
+        "gpu_bfs_single | gpu_bfs_versioned");
 
     
     CLI11_PARSE(app, argc, argv);

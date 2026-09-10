@@ -3,9 +3,15 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 #include <vector>
 
 class Graph;
+
+class GPUBFSBufferOverflow : public std::runtime_error {
+public:
+    explicit GPUBFSBufferOverflow(const char* message) : std::runtime_error(message) {}
+};
 
 class GPUBFSSearch {
 public:
@@ -99,7 +105,8 @@ private:
     uint32_t* d_buf_a_ = nullptr;
     uint32_t* d_buf_b_ = nullptr;
     uint32_t* d_buf_c_ = nullptr;  // third buffer for recursive overflow flush
-    static constexpr size_t MAX_BUF_MATCHES = 400'000'000;
+    static constexpr size_t ABSOLUTE_MAX_BUF_MATCHES = 400'000'000;
+    size_t max_buf_matches_ = 0;
 
     // Counters
     unsigned long long* d_count_ = nullptr;  // logical emitter count (64-bit: dense layers exceed 2^32)
@@ -113,7 +120,7 @@ private:
     size_t edges_capacity_ = 0;
 
     void EnsureEdgesCapacity(size_t n);
-    void EnsureBufCapacity(uint32_t q);
+    void EnsureBufCapacity(uint32_t q, bool versioned = false);
 
     // Recursive BFS from a given depth with overflow handling
     void BFSFromDepth(uint32_t* in_buf, uint32_t in_count,

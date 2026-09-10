@@ -1,5 +1,7 @@
 #include <unordered_set>
 #include <vector>
+#include <climits>
+#include <limits>
 
 #include "utils/types.h"
 #include "graph_storage/graph.h"
@@ -13,7 +15,13 @@ matching::matching(Graph& query_graph, Graph& data_graph,
 : query_(query_graph)
 , data_(data_graph)
 
-, max_num_results_(max_num_results)
+// UINT_MAX is the CLI's historical default for "unlimited". Keeping it as a
+// literal per-edge cap silently truncated hot edges above 2^32-1 matches even
+// though every enumeration counter is size_t. Expand only that sentinel to the
+// native counter width; explicit smaller --max-results values remain caps.
+, max_num_results_(max_num_results == static_cast<size_t>(UINT_MAX)
+                       ? std::numeric_limits<size_t>::max()
+                       : max_num_results)
 , print_preprocessing_results_(print_prep)
 , print_enumeration_results_(print_enum)
 , homomorphism_(homo)
@@ -115,4 +123,4 @@ void matching::PrintCounter()
     // std::cout << num_intermediate_results_without_results_ << " intermediate results without results.\n";
 }
 
-// bool 
+// bool

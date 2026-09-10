@@ -162,7 +162,7 @@ private:
 
     void FindMatches_pure(uint order_index, uint depth, std::vector<uint> m, size_t &num_results);
 
-    inline bool ProcessNeighbor(
+    bool ProcessNeighbor(
         // uint v,                       
         uint u,                       
         uint u_min,                   

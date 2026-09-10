@@ -1452,7 +1452,7 @@ void Parallel_Graphflow::Parallel_FindMatches2(uint order_index, uint depth, std
  * 
  * Thread safety is maintained by using thread-local visited arrays and mappings.
  */
-inline bool Parallel_Graphflow::ProcessNeighbor(
+bool Parallel_Graphflow::ProcessNeighbor(
     // uint v,                       
     uint u,                      
     uint u_min,                 

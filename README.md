@@ -38,15 +38,24 @@ In this paper, we present `ParaCOSM` (Parallel COntinuous Subgraph Matching), an
 ### Compiling
 
 
-Our framework requires c++17 and intel icpx with onetbb. One can compile the code by executing the following commands. 
+The framework requires a C++20 compiler, OpenMP, oneTBB, and the CUDA Toolkit.
+The compiler is selected through the standard CMake options; Intel oneAPI is
+not required. For a V100 machine (compute capability 7.0), build with:
 
 ```shell
-source /path/to/intel/oneAPI/setvars.sh
 cd ParaCOSM/CSM/
-mkdir build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release
-make -j
+cmake -S . -B build-v100 \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_CUDA_ARCHITECTURES=70 \
+  -DCMAKE_CXX_COMPILER=/usr/bin/g++-10 \
+  -DCMAKE_CUDA_HOST_COMPILER=/usr/bin/g++-10
+cmake --build build-v100 -j
 ```
+
+CUDA 11.5 should use GCC/G++ 10 as its host toolchain. With a newer CUDA
+toolkit, the explicit compiler options can normally be omitted. Use CUDA
+architecture `80` for A100, or omit the architecture option to build the
+default V100+A100 (`70;80`) fat binary.
 
 
 ### Execution
@@ -54,14 +63,14 @@ make -j
 After a successful compilation, the binary file is created under the `build/` directory. One can execute CSM using the following command.
 
 ```shell
-build/csm -q <query-graph-path> -d <data-graph-path> -u <update-stream-path> -a <algorithm>
+build-v100/bin/csm -q <query-graph-path> -d <data-graph-path> -u <update-stream-path> -a <algorithm>
 ```
 
 where `<algorithm>` is chosen from `parallel_graphflow`, `parallel_turboflux`, and `parallel_symbi` etc.
 
 
 ```shell
-build/csm -q <query-graph-path> -d <data-graph-path> -u <update-stream-path> -a <algorithm> --max-results 1 --time-limit 3600
+build-v100/bin/csm -q <query-graph-path> -d <data-graph-path> -u <update-stream-path> -a <algorithm> --max-results 1 --time-limit 3600
 ```
 
 
