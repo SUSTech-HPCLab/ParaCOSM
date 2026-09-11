@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Continuously collect 50 distinct, full-stream Amazon GPU-speedup queries."""
+"""Continuously collect distinct, full-stream Amazon GPU-speedup queries."""
 
 from __future__ import annotations
 
 import argparse
 import csv
 import fcntl
+import math
 import os
 import random
 import signal
@@ -35,6 +36,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--candidate-count", type=int, default=10)
     parser.add_argument("--per-round-target", type=int, default=3)
     parser.add_argument("--target-speedup", type=float, default=20.0)
+    parser.add_argument(
+        "--sampling-strategy", choices=("random", "high-volume-pattern"),
+        default="random",
+    )
     parser.add_argument("--cpu-threads", type=int, default=16)
     parser.add_argument("--cpu-numa-node", type=int, default=0)
     parser.add_argument("--gpu-id", type=int, default=0)
@@ -160,6 +165,25 @@ def size_counts(rows: list[dict[str, str]], sizes: list[int]) -> dict[int, int]:
             for size in sizes}
 
 
+def high_volume_seed_score(graph: nx.Graph, row: dict[str, str]) -> float:
+    """Rank verified seeds using the structural signals from the 100-query study."""
+    degrees = [degree for _, degree in graph.degree()]
+    leaves = sum(degree == 1 for degree in degrees)
+    bridges = sum(1 for _ in nx.bridges(graph))
+    cycle_rank = graph.number_of_edges() - graph.number_of_nodes() + 1
+    triangles = sum(nx.triangles(graph).values()) // 3
+    diameter = nx.diameter(graph)
+    matches = max(1, int(row.get("positive_matches") or 1))
+    speedup = float(row.get("speedup") or 0.0)
+    leaf_score = 3.0 if 2 <= leaves <= 3 else -2.0 * abs(leaves - 2)
+    return (
+        3.0 * math.log10(matches)
+        + min(speedup, 80.0) / 20.0
+        + leaf_score + bridges + 0.5 * diameter
+        - 2.0 * cycle_rank - triangles
+    )
+
+
 def make_12v_seed(args: argparse.Namespace, output: Path,
                   rows: list[dict[str, str]], query_dir: Path,
                   round_index: int) -> Path:
@@ -199,8 +223,17 @@ def make_12v_seed(args: argparse.Namespace, output: Path,
 def choose_focus(args: argparse.Namespace, rows: list[dict[str, str]],
                  query_dir: Path, output: Path, size: int,
                  round_index: int) -> Path:
-    verified = [query_dir / row["query"] for row in rows
-                if int(row["vertices"]) == size]
+    size_rows = [row for row in rows if int(row["vertices"]) == size]
+    if args.sampling_strategy == "high-volume-pattern" and size_rows:
+        size_rows.sort(
+            key=lambda row: high_volume_seed_score(
+                load_graph(query_dir / row["query"]), row
+            ),
+            reverse=True,
+        )
+        # Rotate among several strong families rather than cloning one topology.
+        size_rows = size_rows[:min(8, len(size_rows))]
+    verified = [query_dir / row["query"] for row in size_rows]
     if verified:
         return verified[(round_index - 1) % len(verified)]
     seed_dir = args.seed_root / f"{size}v"
@@ -281,6 +314,7 @@ def main() -> int:
                 "--candidate-count", str(args.candidate_count),
                 "--target-count", str(args.per_round_target),
                 "--target-speedup", str(args.target_speedup),
+                "--sampling-strategy", args.sampling_strategy,
                 "--mutation-steps", str(low), str(high),
                 "--random-seed", str(args.base_seed + round_index),
                 "--update-limit", "0",

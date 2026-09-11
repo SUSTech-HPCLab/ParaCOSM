@@ -114,6 +114,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-extra-edges", type=int, default=3)
     parser.add_argument("--mutation-steps", type=int, nargs=2, default=[1, 4],
                         metavar=("MIN", "MAX"))
+    parser.add_argument(
+        "--sampling-strategy", choices=("random", "high-volume-pattern"),
+        default="random",
+        help=("Candidate generation policy. high-volume-pattern keeps sparse "
+              "core-periphery queries with leaves, bridges, and low degeneracy."),
+    )
     parser.add_argument("--include-seeds", action="store_true")
     parser.add_argument("--update-limit", type=int, default=50_000,
                         help="Number of update lines used for screening; 0 means full.")
@@ -198,6 +204,32 @@ def is_connected(vertex_count: int, edges: list[tuple[int, int, int]]) -> bool:
                 seen.add(v)
                 pending.append(v)
     return len(seen) == vertex_count
+
+
+def is_high_volume_pattern(graph: QueryGraph) -> bool:
+    """Return whether a query has the Amazon high-search-volume structure.
+
+    The thresholds come from the first 100 fully verified queries: match volume
+    rises with leaves and bridges and falls with cycle rank.  Requiring a small
+    cyclic core for 10--12v queries avoids the unbounded frontiers observed for
+    large pure trees while retaining weakly constrained pendant paths.
+    """
+    nx_graph = to_networkx(graph)
+    vertex_count = len(graph.labels)
+    degrees = [degree for _, degree in nx_graph.degree()]
+    leaves = sum(degree == 1 for degree in degrees)
+    cycle_rank = len(graph.edges) - vertex_count + 1
+    bridges = sum(1 for _ in nx.bridges(nx_graph))
+    degeneracy = max(nx.core_number(nx_graph).values())
+    diameter = nx.diameter(nx_graph)
+    minimum_rank = 2 if vertex_count >= 10 else 0
+    return (
+        2 <= leaves <= 3
+        and bridges >= 2
+        and degeneracy <= 2
+        and diameter >= 4
+        and minimum_rank <= cycle_rank <= 3
+    )
 
 
 def mutate_query(seed: QueryGraph, rng: random.Random, label_pool: list[int],
@@ -407,6 +439,8 @@ def generate_candidates(args: argparse.Namespace, generated_dir: Path) -> list[P
             seed, rng, label_pool, minimum, maximum, tuple(args.mutation_steps)
         )
         if (not is_connected(vertex_count, list(graph.edges))
+                or (args.sampling_strategy == "high-volume-pattern"
+                    and not is_high_volume_pattern(graph))
                 or not remember_if_unique(graph)):
             continue
         path = generated_dir / f"Q_gpu_{len(candidates) + 1:04d}_{vertex_count}v"
@@ -479,7 +513,8 @@ def main() -> int:
     (output / "run_config.json").write_text(
         json.dumps(config, indent=2, default=str) + "\n", encoding="utf-8"
     )
-    print(f"Generated {len(candidates)} candidates; updates={update_count}; output={output}")
+    print(f"Generated {len(candidates)} candidates; strategy={args.sampling_strategy}; "
+          f"updates={update_count}; output={output}")
     if args.generate_only:
         return 0
 
